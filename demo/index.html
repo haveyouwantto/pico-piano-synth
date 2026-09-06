@@ -1,109 +1,599 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
+
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>pico-piano-synth demo</title>
-<style>
-  * { box-sizing:border-box; }
-  body { margin:0; padding:22px; font-family:system-ui, "Segoe UI", sans-serif;
-         background:#191b20; color:#ddd; }
-  h1 { font-size:17px; color:#fff; }
-  .bar { display:flex; gap:16px; align-items:center; margin:12px 0; flex-wrap:wrap; font-size:13px; }
-  #kb { position:relative; height:165px; background:#0d0e12; border:1px solid #333;
-        border-radius:10px; overflow-x:auto; padding:18px 12px 10px; }
-  #keys { position:relative; height:165px; width:max-content; }
-  .key { position:absolute; bottom:0; cursor:pointer; }
-  .key.w { width:24px; height:165px; background:#f5f2e9; border:1px solid #999; z-index:1; }
-  .key.b { width:15px; height:102px; background:#111; z-index:2; }
-  .key.playing.w { background:#ffd76e; }
-  .key.playing.b { background:#7a5c1a; }
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>pico-piano-synth demo</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: clamp(12px, 4vw, 28px);
+      font-family: system-ui, "Segoe UI", sans-serif;
+      background: #191b20;
+      color: #ddd;
+    }
+
+    main {
+      width: min(100%, 1120px);
+      margin: 0 auto;
+    }
+
+    h1 {
+      margin: 0 0 14px;
+      font-size: clamp(17px, 3vw, 22px);
+      color: #fff;
+    }
+
+    .bar {
+      display: grid;
+      grid-template-columns: minmax(120px, 0.5fr) minmax(260px, 1.8fr) minmax(220px, 1fr);
+      gap: 10px 16px;
+      align-items: center;
+      margin: 12px 0;
+      font-size: 13px;
+    }
+
+    .transport {
+      display: grid;
+      grid-template-columns: minmax(130px, 1fr) auto auto;
+      gap: 8px;
+      align-items: center;
+      min-width: 0;
+    }
+
+    .transport input[type="file"] {
+      min-width: 0;
+      width: 100%;
+    }
+
+    .timeline {
+      display: grid;
+      grid-template-columns: auto minmax(100px, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      grid-column: 1 / -1;
+    }
+
+    #songProgress {
+      width: 100%;
+      min-width: 0;
+      accent-color: #ffd76e;
+    }
+
+    #songStatus {
+      color: #aaa;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    #midiControls {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      min-width: 0;
+    }
+
+    #midiDevices {
+      min-width: 0;
+      max-width: 180px;
+    }
+
+    button {
+      cursor: pointer;
+      min-height: 30px;
+    }
+
+    #kb {
+      position: relative;
+      height: clamp(130px, 28vw, 165px);
+      max-width: 100%;
+      background: #0d0e12;
+      border: 1px solid #333;
+      border-radius: 10px;
+      overflow: hidden;
+      padding: 18px 12px 10px;
+      touch-action: none;
+    }
+
+    #keys {
+      position: relative;
+      height: 165px;
+      width: max-content;
+    }
+
+    .key {
+      position: absolute;
+      top: 0;
+      cursor: pointer;
+    }
+
+    .key.w {
+    width: 0;
+    height: 100%;
+      background: #f5f2e9;
+      border: 1px solid #999;
+      z-index: 1;
+    }
+
+    .key.b {
+    width: 0;
+    height: 62%;
+      background: #111;
+      z-index: 2;
+    }
+
+    .key.playing.w {
+      background: #ffd76e;
+    }
+
+    .key.playing.b {
+      background: #7a5c1a;
+    }
+
+    @media (max-width:700px) {
+      .bar {
+        grid-template-columns: 1fr;
+      }
+
+      .transport {
+        grid-template-columns: 1fr auto auto;
+      }
+
+      .timeline {
+        grid-column: auto;
+      }
+
+      #midiControls {
+        flex-wrap: wrap;
+      }
+
+      #midiDevices {
+        flex: 1 1 150px;
+        max-width: none;
+      }
+    }
+
+    @media (max-width:420px) {
+      .transport {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .transport input[type="file"] {
+        grid-column: 1 / -1;
+      }
+
+      .timeline {
+        grid-template-columns: 1fr auto;
+      }
+
+      #songProgress {
+        grid-column: 1 / -1;
+        grid-row: 1;
+      }
+    }
+  </style>
 </head>
+
 <body>
-  <h1>pico-piano-synth · 88 键示例</h1>
-  <div class="bar">
-    <label>音量 <input id="vol" type="range" min="0" max="1.2" step="0.01" value="0.8"></label>
-    <label>MIDI
-      <select id="midiDevices"><option value="">（无）</option></select>
-      <button id="midiConnect">连接</button>
-    </label>
-    <span id="midiStatus">未连接</span>
-  </div>
-  <div id="kb"><div id="keys"></div></div>
+  <main>
+    <h1>pico-piano-synth · 88 键示例</h1>
+    <div class="bar">
+      <label>音量 <input id="vol" type="range" min="0" max="1.2" step="0.01" value="0.8"></label>
+      <div class="transport">
+        <input id="smfFile" type="file" accept=".mid,.midi,audio/midi,audio/x-midi">
+        <button id="playSong" disabled>播放</button>
+        <button id="stopSong" disabled>停止</button>
+      </div>
+      <div id="midiControls">
+        <label for="midiDevices">MIDI</label>
+        <select id="midiDevices">
+          <option value="">（无）</option>
+        </select>
+        <button id="midiConnect">连接</button>
+      </div>
+      <span id="midiStatus">未连接</span>
+      <div class="timeline">
+        <span id="songCurrent">00:00</span>
+        <input id="songProgress" type="range" min="0" max="0" step="0.01" value="0" disabled>
+        <span id="songDuration">00:00</span>
+      </div>
+      <span id="songStatus">未加载 MIDI</span>
+    </div>
+    <div id="kb">
+      <div id="keys"></div>
+    </div>
 
-<script src="../src/piano-synth.js"></script>
-<script src="../model/piano_nn_bin.js"></script>
-<script>
-let synth = null;
-PianoSynth.load("../model/piano_nn.bin").then(s => { synth = s; }).catch(console.error);
+    <script src="../src/piano-synth.js"></script>
+    <script>
+      let synth = null;
+      PianoSynth.load("../model/piano_nn.bin").then(s => { synth = s; }).catch(console.error);
 
-const midiHz = null; // 库内部处理
-function noteName(m) {
-  const n = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
-  return n[m % 12] + (Math.floor(m / 12) - 1);
-}
-const black = m => [1,3,6,8,10].includes(m % 12);
-const keys = document.getElementById("keys");
-let wi = 0;
-for (let m = 21; m <= 108; m++) {
-  const d = document.createElement("div");
-  d.className = "key " + (black(m) ? "b" : "w");
-  d.id = "k" + m;
-  d.style.left = (black(m) ? wi * 24 - 7.5 : wi++ * 24) + "px";
-  d.addEventListener("pointerdown", () => {
-    if (!synth) return;
-    synth.ensure();
-    synth.noteOn(m, 1);
-    d.classList.add("playing");
-  });
-  d.addEventListener("pointerleave", () => {
-    if (synth) synth.noteOff(m);
-    d.classList.remove("playing");
-  });
-  keys.appendChild(d);
-}
-document.getElementById("keys").style.width = wi * 24 + "px";
-window.addEventListener("pointerup", () => {
-  if (synth) synth.allNotesOff();
-  document.querySelectorAll(".playing").forEach(e => e.classList.remove("playing"));
-});
-document.getElementById("vol").addEventListener("input", e => {
-  if (synth) synth.setVolume(+e.target.value);
-});
+      function noteName(m) {
+        const n = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+        return n[m % 12] + (Math.floor(m / 12) - 1);
+      }
+      const black = m => [1, 3, 6, 8, 10].includes(m % 12);
+      const keys = document.getElementById("keys");
+      const keyPresses = new Map();
+      const keyElements = new Map();
+      let wi = 0;
+      for (let m = 21; m <= 108; m++) {
+        const d = document.createElement("div");
+        d.className = "key " + (black(m) ? "b" : "w");
+        d.id = "k" + m;
+        keyElements.set(m, d);
+        d.addEventListener("pointerdown", () => {
+          playNote(m, 0.7);
+        });
+        d.addEventListener("pointerleave", () => {
+          releaseKey(m);
+        });
+        keys.appendChild(d);
+      }
+      function layoutKeyboard() {
+        const keyboard = document.getElementById("kb");
+        const availableWidth = Math.max(1, keyboard.clientWidth - 26);
+        const whiteWidth = availableWidth / 52;
+        const blackWidth = whiteWidth * 0.625;
+        keys.style.width = availableWidth + "px";
+        keys.style.height = "100%";
+        let whiteIndex = 0;
+        for (let m = 21; m <= 108; m++) {
+          const element = keyElements.get(m);
+          const left = black(m) ? whiteIndex * whiteWidth - blackWidth / 2 : whiteIndex++ * whiteWidth;
+          element.style.left = left + "px";
+          element.style.width = (black(m) ? blackWidth : whiteWidth) + "px";
+        }
+      }
+      layoutKeyboard();
+      window.addEventListener("resize", layoutKeyboard);
+      window.addEventListener("pointerup", () => {
+        if (!songPlaying) stopAllNotes();
+      });
+      document.getElementById("vol").addEventListener("input", e => {
+        if (synth) synth.setVolume(+e.target.value);
+      });
 
-let midiAccess = null, midiPort = null;
-function onMsg(e) {
-  if (!e.data || e.data.length < 2) return;
-  const s = e.data[0], p = e.data[1], v = e.data[2] || 0;
-  if (synth) synth.ensure();
-  const k = Math.max(21, Math.min(108, p));
-  if ((s & 0xF0) === 0x90 && v > 0) {
-    synth && synth.noteOn(k, v / 127);
-    document.getElementById("midiStatus").textContent = "Note On " + noteName(p);
-  } else if ((s & 0xF0) === 0x80 || ((s & 0xF0) === 0x90 && v === 0)) {
-    synth && synth.noteOff(k);
-    document.getElementById("midiStatus").textContent = "Note Off " + noteName(p);
-  } else if ((s & 0xF0) === 0xB0 && p === 64) {
-    synth && synth.setSustain(v >= 64);
-    document.getElementById("midiStatus").textContent =
-      v > 0 ? "Sustain ON" : "Sustain OFF";
-  }
-}
-document.getElementById("midiConnect").addEventListener("click", () => {
-  navigator.requestMIDIAccess && navigator.requestMIDIAccess({sysex:false}).then(acc => {
-    midiAccess = acc;
-    const inputs = [...acc.inputs.values()];
-    const sel = document.getElementById("midiDevices");
-    sel.innerHTML = "";
-    inputs.forEach(p => {
-      const o = document.createElement("option");
-      o.value = p.id; o.textContent = p.name;
-      sel.appendChild(o);
-    });
-    if (inputs.length) { midiPort = inputs[0]; midiPort.onmidimessage = onMsg; }
-  }).catch(() => {});
-});
-</script>
+      let midiAccess = null, midiPort = null;
+      function playNote(note, velocity = 1) {
+        if (!synth) return false;
+        synth.ensure();
+        synth.noteOn(note, velocity);
+        pressKey(note);
+        return true;
+      }
+
+      function pressKey(note) {
+        keyPresses.set(note, (keyPresses.get(note) || 0) + 1);
+        document.getElementById("k" + note)?.classList.add("playing");
+      }
+
+      function releaseKey(note) {
+        const count = keyPresses.get(note) || 0;
+        if (count <= 1) {
+          keyPresses.delete(note);
+          document.getElementById("k" + note)?.classList.remove("playing");
+        } else {
+          keyPresses.set(note, count - 1);
+        }
+        if (synth) synth.noteOff(note);
+      }
+
+      function stopAllNotes() {
+        if (synth) synth.allNotesOff();
+        keyPresses.clear();
+        document.querySelectorAll(".playing").forEach(e => e.classList.remove("playing"));
+      }
+
+      function onMsg(e) {
+        if (!e.data || e.data.length < 2) return;
+        const s = e.data[0], p = e.data[1], v = e.data[2] || 0;
+        if (synth) synth.ensure();
+        const k = Math.max(21, Math.min(108, p));
+        if ((s & 0xF0) === 0x90 && v > 0) {
+          synth && synth.noteOn(k, v / 127);
+          pressKey(k);
+          document.getElementById("midiStatus").textContent = "Note On " + noteName(p);
+        } else if ((s & 0xF0) === 0x80 || ((s & 0xF0) === 0x90 && v === 0)) {
+          releaseKey(k);
+          document.getElementById("midiStatus").textContent = "Note Off " + noteName(p);
+        } else if ((s & 0xF0) === 0xB0 && p === 64) {
+          synth && synth.setSustain(v >= 64);
+          document.getElementById("midiStatus").textContent =
+            v > 0 ? "Sustain ON" : "Sustain OFF";
+        }
+      }
+      document.getElementById("midiConnect").addEventListener("click", () => {
+        navigator.requestMIDIAccess && navigator.requestMIDIAccess({ sysex: false }).then(acc => {
+          midiAccess = acc;
+          const inputs = [...acc.inputs.values()];
+          const sel = document.getElementById("midiDevices");
+          sel.innerHTML = "";
+          inputs.forEach(p => {
+            const o = document.createElement("option");
+            o.value = p.id; o.textContent = p.name;
+            sel.appendChild(o);
+          });
+          if (inputs.length) { midiPort = inputs[0]; midiPort.onmidimessage = onMsg; }
+        }).catch(() => { });
+      });
+
+      // Minimal SMF reader for format 0/1 files used by the demo.
+      function readU16(view, offset) {
+        return view.getUint16(offset, false);
+      }
+
+      function readU32(view, offset) {
+        return view.getUint32(offset, false);
+      }
+
+      function readVarLen(bytes, state) {
+        let value = 0;
+        let byte;
+        do {
+          if (state.offset >= bytes.length) throw new Error("MIDI 数据不完整");
+          byte = bytes[state.offset++];
+          value = (value << 7) | (byte & 0x7f);
+        } while (byte & 0x80);
+        return value;
+      }
+
+      function parseSmf(buffer) {
+        const view = new DataView(buffer);
+        const bytes = new Uint8Array(buffer);
+        if (bytes.length < 14 || String.fromCharCode(...bytes.subarray(0, 4)) !== "MThd") {
+          throw new Error("不是有效的 Standard MIDI 文件");
+        }
+
+        const headerLength = readU32(view, 4);
+        const format = readU16(view, 8);
+        const trackCount = readU16(view, 10);
+        const division = readU16(view, 12);
+        if (headerLength < 6 || (format !== 0 && format !== 1)) {
+          throw new Error("Demo 仅支持 MIDI Type 0/1");
+        }
+        if (division & 0x8000) throw new Error("不支持 SMPTE 时间格式");
+
+        let offset = 8 + headerLength;
+        const tracks = [];
+        for (let trackIndex = 0; trackIndex < trackCount; trackIndex++) {
+          if (offset + 8 > bytes.length || String.fromCharCode(...bytes.subarray(offset, offset + 4)) !== "MTrk") {
+            throw new Error("MIDI 轨道数据损坏");
+          }
+          const length = readU32(view, offset + 4);
+          const start = offset + 8;
+          const end = start + length;
+          if (end > bytes.length) throw new Error("MIDI 轨道数据不完整");
+          tracks.push({ bytes, start, end });
+          offset = end;
+        }
+
+        const events = [];
+        const tempos = [{ tick: 0, microsecondsPerBeat: 500000 }];
+        for (const track of tracks) {
+          const state = { offset: track.start };
+          let tick = 0;
+          let runningStatus = 0;
+          while (state.offset < track.end) {
+            tick += readVarLen(bytes.subarray(0, track.end), state);
+            let status = bytes[state.offset++];
+            if (status < 0x80) {
+              if (!runningStatus) throw new Error("MIDI running status 无效");
+              state.offset--;
+              status = runningStatus;
+            } else if (status < 0xf0) {
+              runningStatus = status;
+            }
+
+            if (status === 0xff) {
+              const type = bytes[state.offset++];
+              const length = readVarLen(bytes.subarray(0, track.end), state);
+              if (type === 0x51 && length === 3) {
+                const tempo = (bytes[state.offset] << 16) | (bytes[state.offset + 1] << 8) | bytes[state.offset + 2];
+                tempos.push({ tick, microsecondsPerBeat: tempo });
+              }
+              state.offset += length;
+              if (type === 0x2f) break;
+              continue;
+            }
+            if (status === 0xf0 || status === 0xf7) {
+              state.offset += readVarLen(bytes.subarray(0, track.end), state);
+              continue;
+            }
+
+            const command = status & 0xf0;
+            const channel = status & 0x0f;
+            const dataLength = command === 0xc0 || command === 0xd0 ? 1 : 2;
+            if (state.offset + dataLength > track.end) throw new Error("MIDI 事件数据不完整");
+            const data1 = bytes[state.offset++];
+            const data2 = dataLength === 2 ? bytes[state.offset++] : 0;
+            if (command === 0x90 || command === 0x80 || (command === 0xb0 && data1 === 64)) {
+              events.push({ tick, command, channel, note: data1, value: data2 });
+            }
+          }
+        }
+
+        tempos.sort((a, b) => a.tick - b.tick);
+        const tempoMap = new Map();
+        tempos.forEach(tempo => tempoMap.set(tempo.tick, tempo));
+        tempos.splice(0, tempos.length, ...[...tempoMap.values()].sort((a, b) => a.tick - b.tick));
+        events.sort((a, b) => a.tick - b.tick);
+        let lastTick = 0;
+        let elapsed = 0;
+        let tempoIndex = 0;
+        for (const event of events) {
+          while (tempoIndex + 1 < tempos.length && tempos[tempoIndex + 1].tick <= event.tick) {
+            const nextTempo = tempos[++tempoIndex];
+            elapsed += (nextTempo.tick - lastTick) * tempos[tempoIndex - 1].microsecondsPerBeat / division;
+            lastTick = nextTempo.tick;
+          }
+          event.time = (elapsed + (event.tick - lastTick) * tempos[tempoIndex].microsecondsPerBeat / division) / 1000000;
+        }
+        const duration = events.length ? Math.max(...events.map(e => e.time)) : 0;
+        return { events, duration, format, trackCount, tempoChanges: Math.max(0, tempos.length - 1) };
+      }
+
+      const smfFile = document.getElementById("smfFile");
+      const playSong = document.getElementById("playSong");
+      const stopSong = document.getElementById("stopSong");
+      const songStatus = document.getElementById("songStatus");
+      const songCurrent = document.getElementById("songCurrent");
+      const songDuration = document.getElementById("songDuration");
+      const songProgress = document.getElementById("songProgress");
+      let song = null;
+      let songTimers = [];
+      let songPlaying = false;
+      let songPosition = 0;
+      let songStartedAt = 0;
+      let progressFrame = 0;
+
+      function formatTime(seconds) {
+        const safeSeconds = Math.max(0, Number.isFinite(seconds) ? seconds : 0);
+        const minutes = Math.floor(safeSeconds / 60);
+        const remainder = Math.floor(safeSeconds % 60).toString().padStart(2, "0");
+        return `${minutes}:${remainder}`;
+      }
+
+      function updateSongProgress() {
+        const duration = song ? song.duration : 0;
+        const position = songPlaying ? Math.min(duration, (performance.now() - songStartedAt) / 1000) : songPosition;
+        if (songPlaying) songPosition = position;
+        songCurrent.textContent = formatTime(position);
+        songDuration.textContent = formatTime(duration);
+        songProgress.max = duration;
+        songProgress.value = Math.min(duration, position);
+        if (songPlaying) progressFrame = requestAnimationFrame(updateSongProgress);
+      }
+
+      function setSongPosition(position) {
+        songPosition = Math.max(0, Math.min(song ? song.duration : 0, position));
+        updateSongProgress();
+      }
+
+      function clearSongTimers() {
+        songTimers.forEach(timer => clearTimeout(timer));
+        songTimers = [];
+      }
+
+      function stopSongPlayback(resetPosition = false) {
+        clearSongTimers();
+        cancelAnimationFrame(progressFrame);
+        songPlaying = false;
+        if (synth) synth.setSustain(false);
+        stopAllNotes();
+        if (resetPosition) setSongPosition(0);
+        if (song) {
+          songStatus.textContent = `${song.fileName} · ${resetPosition ? "已停止" : "已暂停"}`;
+          playSong.textContent = "继续";
+        }
+      }
+
+      function getSongStateAt(position) {
+        const active = new Map();
+        let sustain = false;
+        for (const event of song.events) {
+          if (event.time >= position) break;
+          const note = Math.max(21, Math.min(108, event.note));
+          if (event.command === 0x90 && event.value > 0) {
+            active.set(note, event.value / 127);
+          } else if (event.command === 0x80 || (event.command === 0x90 && event.value === 0)) {
+            active.delete(note);
+          } else if (event.command === 0xb0 && event.note === 64) {
+            sustain = event.value >= 64;
+          }
+        }
+        return { active, sustain };
+      }
+
+      function scheduleSongFrom(position) {
+        clearSongTimers();
+        stopAllNotes();
+        if (synth) synth.setSustain(false);
+        const state = getSongStateAt(position);
+        if (state.sustain && synth) synth.setSustain(true);
+        state.active.forEach((velocity, note) => {
+          synth.noteOn(note, velocity);
+          pressKey(note);
+        });
+
+        for (const event of song.events) {
+          if (event.time <= position) continue;
+          const timer = setTimeout(() => {
+            if (!songPlaying) return;
+            const note = Math.max(21, Math.min(108, event.note));
+            if (event.command === 0x90 && event.value > 0) {
+              synth.noteOn(note, event.value / 127);
+              pressKey(note);
+            } else if (event.command === 0x80 || (event.command === 0x90 && event.value === 0)) {
+              releaseKey(note);
+            } else if (event.command === 0xb0 && event.note === 64) {
+              synth.setSustain(event.value >= 64);
+            }
+          }, Math.max(0, event.time - position) * 1000);
+          songTimers.push(timer);
+        }
+        songTimers.push(setTimeout(() => stopSongPlayback(true), Math.max(0, song.duration - position + 0.1) * 1000));
+      }
+
+      function playSongFile() {
+        if (!song || !synth) return;
+        if (songPosition >= song.duration) songPosition = 0;
+        synth.ensure();
+        songPlaying = true;
+        songStartedAt = performance.now() - songPosition * 1000;
+        songStatus.textContent = `${song.fileName} · 播放中`;
+        playSong.textContent = "暂停";
+        scheduleSongFrom(songPosition);
+        cancelAnimationFrame(progressFrame);
+        progressFrame = requestAnimationFrame(updateSongProgress);
+      }
+
+      smfFile.addEventListener("change", async event => {
+        const file = event.target.files[0];
+        if (!file) return;
+        try {
+          stopSongPlayback(true);
+          const parsed = parseSmf(await file.arrayBuffer());
+          song = { ...parsed, fileName: file.name };
+          playSong.disabled = false;
+          stopSong.disabled = false;
+          songProgress.disabled = false;
+          setSongPosition(0);
+          playSong.textContent = "播放";
+          songStatus.textContent = `${file.name} · ${parsed.trackCount} 轨 · ${parsed.tempoChanges} 个 tempo · ${formatTime(parsed.duration)}`;
+        } catch (error) {
+          song = null;
+          playSong.disabled = true;
+          stopSong.disabled = true;
+          songProgress.disabled = true;
+          setSongPosition(0);
+          songStatus.textContent = error.message;
+        }
+      });
+      playSong.addEventListener("click", () => {
+        if (songPlaying) stopSongPlayback(false);
+        else playSongFile();
+      });
+      stopSong.addEventListener("click", () => stopSongPlayback(true));
+      songProgress.addEventListener("input", event => {
+        const position = Number(event.target.value);
+        if (songPlaying) {
+          songPosition = position;
+          songStartedAt = performance.now() - position * 1000;
+          scheduleSongFrom(position);
+        } else {
+          setSongPosition(position);
+        }
+      });
+    </script>
+  </main>
 </body>
+
 </html>

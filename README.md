@@ -108,7 +108,8 @@ const synth = await PianoSynth.load("model/piano_nn.bin");
 
 ## 本地 Demo
 
-项目自带一个包含 88 键虚拟键盘、控制面板及 Web MIDI 接入能力的测试页面：
+项目自带一个包含 88 键虚拟键盘、SMF/MIDI 文件播放、控制面板及 Web MIDI 接入能力的测试页面。
+选择 `.mid` 或 `.midi` 文件后即可播放，播放中的音符会在键盘上高亮。
 
 ```bash
 # 启动本地服务
@@ -118,7 +119,7 @@ npx serve .
 
 打开浏览器访问 `http://localhost:3000/demo/`。
 
-*(注：Web MIDI 硬件接入需要浏览器支持相应 API，且仅在安全上下文 HTTPS 或 localhost 下生效)*
+*(注：Web MIDI 硬件接入需要浏览器支持相应 API，且仅在安全上下文 HTTPS 或 localhost 下生效。Demo 的 SMF 播放支持常见的 Type 0/1 文件。)*
 
 ---
 
@@ -130,4 +131,4 @@ npx serve .
 
 ## 开源协议
 
-[MIT License](https://www.google.com/search?q=LICENSE)
+[MIT License](LICENSE)
