@@ -1,6 +1,6 @@
 {
   "name": "pico-piano-synth",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Tiny PeriodicWave piano synth with neural network model for Web Audio API.",
   "main": "dist/piano-synth-embedded.min.js",
   "type": "commonjs",
