@@ -280,10 +280,10 @@
         if (count <= 1) {
           keyPresses.delete(note);
           document.getElementById("k" + note)?.classList.remove("playing");
+          if (synth) synth.noteOff(note);
         } else {
           keyPresses.set(note, count - 1);
         }
-        if (synth) synth.noteOff(note);
       }
 
       function stopAllNotes() {
@@ -298,8 +298,7 @@
         if (synth) synth.ensure();
         const k = Math.max(21, Math.min(108, p));
         if ((s & 0xF0) === 0x90 && v > 0) {
-          synth && synth.noteOn(k, v / 127);
-          pressKey(k);
+          playNote(k, v / 127);
           document.getElementById("midiStatus").textContent = "Note On " + noteName(p);
         } else if ((s & 0xF0) === 0x80 || ((s & 0xF0) === 0x90 && v === 0)) {
           releaseKey(k);
