@@ -29,6 +29,7 @@ module.exports = {
       filename: "index.html",
       templateContent: getTemplate(),
       inject: "head",
+      scriptLoading: "blocking",
       minify: {
         collapseWhitespace: true,
         removeComments: true,
