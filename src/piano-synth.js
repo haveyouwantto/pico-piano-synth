@@ -299,7 +299,7 @@ class PianoSynth {
     const nyquist = this.ctx.sampleRate / 2;
     const pitchComp = Math.pow(2, Math.max(-0.8, (60 - m) / 48));
     const filterStart = Math.min(
-      Math.max(freq * 4 * pitchComp, cutoffFreq * 1.5), nyquist);
+      Math.max(freq * 4 * pitchComp, cutoffFreq), nyquist);
     const filterTarget = Math.min(
       Math.max(freq * 1.2, cutoffFreq * 0.1), nyquist);
     const filterDecay = decayTime / 3;
