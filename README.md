@@ -117,7 +117,7 @@ npx serve .
 
 ```
 
-打开浏览器访问 `http://localhost:3000/demo/`。
+打开浏览器访问 `http://localhost:3000/`。
 
 *(注：Web MIDI 硬件接入需要浏览器支持相应 API，且仅在安全上下文 HTTPS 或 localhost 下生效。Demo 的 SMF 播放支持常见的 Type 0/1 文件。)*
 

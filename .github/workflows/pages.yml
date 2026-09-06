@@ -36,7 +36,7 @@ jobs:
       - name: Assemble Pages site
         run: |
           mkdir -p site
-          cp -R pages/index.html demo src model dist site/
+          cp -R demo/* src model dist site/
 
       - name: Configure Pages
         uses: actions/configure-pages@v5

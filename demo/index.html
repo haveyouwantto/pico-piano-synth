@@ -210,10 +210,10 @@
       <div id="keys"></div>
     </div>
 
-    <script src="../src/piano-synth.js"></script>
+    <script src="src/piano-synth.js"></script>
     <script>
       let synth = null;
-      PianoSynth.load("../model/piano_nn.bin").then(s => { synth = s; }).catch(console.error);
+      PianoSynth.load("model/piano_nn.bin").then(s => { synth = s; }).catch(console.error);
 
       function noteName(m) {
         const n = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
