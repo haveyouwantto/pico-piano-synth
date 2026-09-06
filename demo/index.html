@@ -255,7 +255,7 @@
       layoutKeyboard();
       window.addEventListener("resize", layoutKeyboard);
       window.addEventListener("pointerup", () => {
-        if (!songPlaying) stopAllNotes();
+        if (!songState.playing) stopAllNotes();
       });
       document.getElementById("vol").addEventListener("input", e => {
         if (synth) synth.setVolume(+e.target.value);
@@ -449,10 +449,12 @@
       const songProgress = document.getElementById("songProgress");
       let song = null;
       let songTimers = [];
-      let songPlaying = false;
-      let songPosition = 0;
-      let songStartedAt = 0;
-      let progressFrame = 0;
+      const songState = {
+        playing: false,
+        position: 0,
+        startedAt: 0,
+        progressFrame: 0
+      };
 
       function formatTime(seconds) {
         const safeSeconds = Math.max(0, Number.isFinite(seconds) ? seconds : 0);
@@ -463,17 +465,17 @@
 
       function updateSongProgress() {
         const duration = song ? song.duration : 0;
-        const position = songPlaying ? Math.min(duration, (performance.now() - songStartedAt) / 1000) : songPosition;
-        if (songPlaying) songPosition = position;
+        const position = songState.playing ? Math.min(duration, (performance.now() - songState.startedAt) / 1000) : songState.position;
+        if (songState.playing) songState.position = position;
         songCurrent.textContent = formatTime(position);
         songDuration.textContent = formatTime(duration);
         songProgress.max = duration;
         songProgress.value = Math.min(duration, position);
-        if (songPlaying) progressFrame = requestAnimationFrame(updateSongProgress);
+        if (songState.playing) songState.progressFrame = requestAnimationFrame(updateSongProgress);
       }
 
       function setSongPosition(position) {
-        songPosition = Math.max(0, Math.min(song ? song.duration : 0, position));
+        songState.position = Math.max(0, Math.min(song ? song.duration : 0, position));
         updateSongProgress();
       }
 
@@ -484,8 +486,8 @@
 
       function stopSongPlayback(resetPosition = false) {
         clearSongTimers();
-        cancelAnimationFrame(progressFrame);
-        songPlaying = false;
+        cancelAnimationFrame(songState.progressFrame);
+        songState.playing = false;
         if (synth) synth.setSustain(false);
         stopAllNotes();
         if (resetPosition) setSongPosition(0);
@@ -526,7 +528,7 @@
         for (const event of song.events) {
           if (event.time <= position) continue;
           const timer = setTimeout(() => {
-            if (!songPlaying) return;
+            if (!songState.playing) return;
             const note = Math.max(21, Math.min(108, event.note));
             if (event.command === 0x90 && event.value > 0) {
               synth.noteOn(note, event.value / 127);
@@ -544,15 +546,15 @@
 
       function playSongFile() {
         if (!song || !synth) return;
-        if (songPosition >= song.duration) songPosition = 0;
+        if (songState.position >= song.duration) songState.position = 0;
         synth.ensure();
-        songPlaying = true;
-        songStartedAt = performance.now() - songPosition * 1000;
+        songState.playing = true;
+        songState.startedAt = performance.now() - songState.position * 1000;
         songStatus.textContent = `${song.fileName} · 播放中`;
         playSong.textContent = "暂停";
-        scheduleSongFrom(songPosition);
-        cancelAnimationFrame(progressFrame);
-        progressFrame = requestAnimationFrame(updateSongProgress);
+        scheduleSongFrom(songState.position);
+        cancelAnimationFrame(songState.progressFrame);
+        songState.progressFrame = requestAnimationFrame(updateSongProgress);
       }
 
       smfFile.addEventListener("change", async event => {
@@ -578,15 +580,15 @@
         }
       });
       playSong.addEventListener("click", () => {
-        if (songPlaying) stopSongPlayback(false);
+        if (songState.playing) stopSongPlayback(false);
         else playSongFile();
       });
       stopSong.addEventListener("click", () => stopSongPlayback(true));
       songProgress.addEventListener("input", event => {
         const position = Number(event.target.value);
-        if (songPlaying) {
-          songPosition = position;
-          songStartedAt = performance.now() - position * 1000;
+        if (songState.playing) {
+          songState.position = position;
+          songState.startedAt = performance.now() - position * 1000;
           scheduleSongFrom(position);
         } else {
           setSongPosition(position);
