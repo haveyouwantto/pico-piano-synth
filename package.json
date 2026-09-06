@@ -9,10 +9,13 @@
     "build:lib": "terser src/piano-synth.js -c -m --keep-classnames --keep-fnames -o dist/piano-synth.min.js",
     "build:model": "terser model/piano_nn_bin.js -c -m -o dist/piano_nn_bin.min.js",
     "build:embedded": "node scripts/build-embedded.js",
-    "build:pages": "node scripts/build-pages.js"
+    "build:pages": "webpack --config webpack.pages.config.js"
   },
   "devDependencies": {
-    "terser": "^5.31.0"
+    "html-webpack-plugin": "^5.6.8",
+    "terser": "^5.31.0",
+    "webpack": "^5.110.3",
+    "webpack-cli": "^7.2.3"
   },
   "files": [
     "src",
