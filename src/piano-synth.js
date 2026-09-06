@@ -132,7 +132,10 @@ class PianoSynth {
       this.ctx = new AC();
       this.master = this.ctx.createGain();
       this.master.gain.value = this._vol;
-      this.master.connect(this.ctx.destination);
+
+      this.compressor = this.ctx.createDynamicsCompressor();
+      this.master.connect(this.compressor);
+      this.compressor.connect(this.ctx.destination);
 
       // 创建 Dry / Wet 混响链路
       this.dryGain = this.ctx.createGain();
