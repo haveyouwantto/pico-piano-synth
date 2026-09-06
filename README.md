@@ -37,7 +37,7 @@ npm install pico-piano-synth
 ### 方式一：使用内嵌模型单文件（推荐）
 
 ```html
-<script src="node_modules/pico-piano-synth/dist/piano-synth-embedded.min.js"></script>
+<script src="https://unpkg.com/pico-piano-synth@0.2.1/dist/piano-synth-embedded.min.js"></script>
 
 <button id="play">播放</button>
 
@@ -64,11 +64,11 @@ document.getElementById("play").addEventListener("click", async () => {
 ### 方式二：分离式加载模型
 
 ```html
-<script src="node_modules/pico-piano-synth/dist/piano-synth.min.js"></script>
+<script src="https://unpkg.com/pico-piano-synth@0.2.1/dist/piano-synth.min.js"></script>
 
 <script>
 // 手动指定二进制模型文件 (.bin) 路径
-const synth = await PianoSynth.load("model/piano_nn.bin");
+const synth = await PianoSynth.load("https://unpkg.com/pico-piano-synth@0.2.1/dist/piano_nn.bin");
 </script>
 
 ```
