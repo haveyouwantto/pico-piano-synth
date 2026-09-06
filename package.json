@@ -8,7 +8,8 @@
     "build": "node scripts/prepare-dist.js && npm run build:lib && npm run build:model && node scripts/copy-model.js && npm run build:embedded",
     "build:lib": "terser src/piano-synth.js -c -m --keep-classnames --keep-fnames -o dist/piano-synth.min.js",
     "build:model": "terser model/piano_nn_bin.js -c -m -o dist/piano_nn_bin.min.js",
-    "build:embedded": "node scripts/build-embedded.js"
+    "build:embedded": "node scripts/build-embedded.js",
+    "build:pages": "node scripts/build-pages.js"
   },
   "devDependencies": {
     "terser": "^5.31.0"
