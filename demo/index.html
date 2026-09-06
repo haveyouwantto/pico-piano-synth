@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pico-piano-synth demo</title>
+<style>
+  * { box-sizing:border-box; }
+  body { margin:0; padding:22px; font-family:system-ui, "Segoe UI", sans-serif;
+         background:#191b20; color:#ddd; }
+  h1 { font-size:17px; color:#fff; }
+  .bar { display:flex; gap:16px; align-items:center; margin:12px 0; flex-wrap:wrap; font-size:13px; }
+  #kb { position:relative; height:165px; background:#0d0e12; border:1px solid #333;
+        border-radius:10px; overflow-x:auto; padding:18px 12px 10px; }
+  #keys { position:relative; height:165px; width:max-content; }
+  .key { position:absolute; bottom:0; cursor:pointer; }
+  .key.w { width:24px; height:165px; background:#f5f2e9; border:1px solid #999; z-index:1; }
+  .key.b { width:15px; height:102px; background:#111; z-index:2; }
+  .key.playing.w { background:#ffd76e; }
+  .key.playing.b { background:#7a5c1a; }
+</style>
+</head>
+<body>
+  <h1>pico-piano-synth · 88 键示例</h1>
+  <div class="bar">
+    <label>音量 <input id="vol" type="range" min="0" max="1.2" step="0.01" value="0.8"></label>
+    <label>MIDI
+      <select id="midiDevices"><option value="">（无）</option></select>
+      <button id="midiConnect">连接</button>
+    </label>
+    <span id="midiStatus">未连接</span>
+  </div>
+  <div id="kb"><div id="keys"></div></div>
+
+<script src="../src/piano-synth.js"></script>
+<script src="../model/piano_nn_bin.js"></script>
+<script>
+let synth = null;
+PianoSynth.load("../model/piano_nn.bin").then(s => { synth = s; }).catch(console.error);
+
+const midiHz = null; // 库内部处理
+function noteName(m) {
+  const n = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+  return n[m % 12] + (Math.floor(m / 12) - 1);
+}
+const black = m => [1,3,6,8,10].includes(m % 12);
+const keys = document.getElementById("keys");
+let wi = 0;
+for (let m = 21; m <= 108; m++) {
+  const d = document.createElement("div");
+  d.className = "key " + (black(m) ? "b" : "w");
+  d.id = "k" + m;
+  d.style.left = (black(m) ? wi * 24 - 7.5 : wi++ * 24) + "px";
+  d.addEventListener("pointerdown", () => {
+    if (!synth) return;
+    synth.ensure();
+    synth.noteOn(m, 1);
+    d.classList.add("playing");
+  });
+  d.addEventListener("pointerleave", () => {
+    if (synth) synth.noteOff(m);
+    d.classList.remove("playing");
+  });
+  keys.appendChild(d);
+}
+document.getElementById("keys").style.width = wi * 24 + "px";
+window.addEventListener("pointerup", () => {
+  if (synth) synth.allNotesOff();
+  document.querySelectorAll(".playing").forEach(e => e.classList.remove("playing"));
+});
+document.getElementById("vol").addEventListener("input", e => {
+  if (synth) synth.setVolume(+e.target.value);
+});
+
+let midiAccess = null, midiPort = null;
+function onMsg(e) {
+  if (!e.data || e.data.length < 2) return;
+  const s = e.data[0], p = e.data[1], v = e.data[2] || 0;
+  if (synth) synth.ensure();
+  const k = Math.max(21, Math.min(108, p));
+  if ((s & 0xF0) === 0x90 && v > 0) {
+    synth && synth.noteOn(k, v / 127);
+    document.getElementById("midiStatus").textContent = "Note On " + noteName(p);
+  } else if ((s & 0xF0) === 0x80 || ((s & 0xF0) === 0x90 && v === 0)) {
+    synth && synth.noteOff(k);
+    document.getElementById("midiStatus").textContent = "Note Off " + noteName(p);
+  } else if ((s & 0xF0) === 0xB0 && p === 64) {
+    synth && synth.setSustain(v >= 64);
+    document.getElementById("midiStatus").textContent =
+      v > 0 ? "Sustain ON" : "Sustain OFF";
+  }
+}
+document.getElementById("midiConnect").addEventListener("click", () => {
+  navigator.requestMIDIAccess && navigator.requestMIDIAccess({sysex:false}).then(acc => {
+    midiAccess = acc;
+    const inputs = [...acc.inputs.values()];
+    const sel = document.getElementById("midiDevices");
+    sel.innerHTML = "";
+    inputs.forEach(p => {
+      const o = document.createElement("option");
+      o.value = p.id; o.textContent = p.name;
+      sel.appendChild(o);
+    });
+    if (inputs.length) { midiPort = inputs[0]; midiPort.onmidimessage = onMsg; }
+  }).catch(() => {});
+});
+</script>
+</body>
+</html>

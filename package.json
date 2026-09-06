@@ -1,0 +1,29 @@
+{
+  "name": "pico-piano-synth",
+  "version": "0.1.1",
+  "description": "Tiny PeriodicWave piano synth with neural network model for Web Audio API.",
+  "main": "dist/piano-synth-embedded.min.js",
+  "type": "commonjs",
+  "scripts": {
+    "build": "npm run build:lib && npm run build:model && node scripts/copy-model.js && npm run build:embedded",
+    "build:lib": "terser src/piano-synth.js -c -m --keep-classnames --keep-fnames -o dist/piano-synth.min.js",
+    "build:model": "terser model/piano_nn_bin.js -c -m -o dist/piano_nn_bin.min.js",
+    "build:embedded": "node scripts/build-embedded.js"
+  },
+  "devDependencies": {
+    "terser": "^5.31.0"
+  },
+  "files": [
+    "src",
+    "model",
+    "dist"
+  ],
+  "keywords": [
+    "piano",
+    "synth",
+    "web-audio",
+    "periodicwave",
+    "ddsp"
+  ],
+  "license": "MIT"
+}
