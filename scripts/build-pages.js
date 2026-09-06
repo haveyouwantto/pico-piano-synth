@@ -3,7 +3,7 @@ const path = require("path");
 const { minify } = require("terser");
 
 const root = path.join(__dirname, "..");
-const site = path.join(root, "site");
+const site = path.resolve(process.env.PAGES_SITE_DIR || path.join(root, "site"));
 const demo = fs.readFileSync(path.join(root, "demo", "index.html"), "utf8");
 const embedded = fs.readFileSync(path.join(root, "dist", "piano-synth-embedded.min.js"), "utf8");
 
@@ -31,8 +31,9 @@ async function build() {
     throw new Error("Expected one inline style and one inline script in demo/index.html");
   }
 
-  const inlineScript = scriptMatches[0][1]
-    .replace(/PianoSynth\.load\([^)]*\)/, "PianoSynth.load()");
+    const inlineScript = `(() => {
+  ${scriptMatches[0][1].replace(/PianoSynth\.load\([^)]*\)/, "PianoSynth.load()")}
+  })();`;
   const minifiedScript = (await minify(inlineScript, {
     compress: true,
     mangle: true,
