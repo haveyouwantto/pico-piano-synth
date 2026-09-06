@@ -1,7 +1,8 @@
 /*
  * PianoSynth - minimal ddsp-piano inspired synth built on PeriodicWave.
  *
- * Model: PIANO_NN (midi -> 32 partial intensities at x*f0), 8-bit quantised.
+ * Model: PIANO_NN v2 (midi + low/high bank -> 32 partial intensities at x*f0),
+ * 8-bit quantised. The two banks cover up to 64 partials in total.
  * Envelope: decayTime + lowpass sweep (user formula):
  *   decayTime  = max(decay * 1.7 * 2^((60-pitch)/18), 0.5)
  *   filterStart/Target/Decay as in the pluck model, gain = setTargetAtTime.
@@ -46,9 +47,10 @@ class PianoSynth {
     if (magic !== "DP8N") throw new Error("bad model magic: " + magic);
     off = 4;
     const version = u8[off++];
-    if (version !== 1) throw new Error("unsupported model version " + version);
+    if (version !== 1 && version !== 2) throw new Error("unsupported model version " + version);
     const nPartials = u8[off++];
     const nLayers = u8[off++];
+    const inputDim = version >= 2 ? u8[off++] : 1;
     const mMin = dv.getFloat32(off, true); off += 4;
     const mSpan = dv.getFloat32(off, true); off += 4;
     let n;
@@ -69,7 +71,7 @@ class PianoSynth {
       n = bLen; const b = readQ();
       layers.push({ w, b });
     }
-    return { n_partials: nPartials, m_min: mMin, m_span: mSpan, layers };
+    return { n_partials: nPartials, input_dim: inputDim, m_min: mMin, m_span: mSpan, layers };
   }
 
   static async load(url) {
@@ -106,7 +108,7 @@ class PianoSynth {
 
   _decodeModel() {
     this.layers = [];
-    let prev = 1;                    // input dim = 1 (midi)
+    let prev = this.model.input_dim || 1;
     for (const raw of this.model.layers) {
       const wq = this._q8(raw.w);
       const bq = this._q8(raw.b);
@@ -233,9 +235,12 @@ class PianoSynth {
     if (this.master) this.master.gain.value = v;
   }
 
-  _forward(m) {
-    if (this.envCache.has(m)) return this.envCache.get(m);
-    let a = Float32Array.of((m - this.model.m_min) / this.model.m_span);
+  _forward(m, bank = 0) {
+    const key = m + ":" + bank;
+    if (this.envCache.has(key)) return this.envCache.get(key);
+    let a = this.model.input_dim === 2
+      ? Float32Array.of((m - this.model.m_min) / this.model.m_span, bank)
+      : Float32Array.of((m - this.model.m_min) / this.model.m_span);
     for (let li = 0; li < this.layers.length; li++) {
       const L = this.layers[li];
       const last = li === this.layers.length - 1;
@@ -248,7 +253,7 @@ class PianoSynth {
       }
       a = out;
     }
-    this.envCache.set(m, a);
+    this.envCache.set(key, a);
     return a;
   }
 
@@ -262,9 +267,13 @@ class PianoSynth {
     const N = this._maxPartial(m);
     const real = new Float32Array(N + 1);
     const imag = new Float32Array(N + 1);
-    const env = this._forward(m);
+    const bankSize = this.model.input_dim === 2 ? 32 : this.model.n_partials;
+    const banks = new Map();
     for (let h = 1; h <= N; h++) {
-      const db = h <= env.length ? env[h - 1] : -200;
+      const bank = Math.floor((h - 1) / bankSize);
+      if (!banks.has(bank)) banks.set(bank, this._forward(m, bank));
+      const env = banks.get(bank);
+      const db = (h - 1) % bankSize < env.length ? env[(h - 1) % bankSize] : -200;
       imag[h] = Math.pow(10, db / 20);      // raw dB -> amplitude, no cutoff
     }
     const wave = this.ctx.createPeriodicWave(real, imag);   // default norm
