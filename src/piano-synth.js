@@ -291,7 +291,11 @@ class PianoSynth {
     if (this.active.has(m)) this._release(m);
     const now = this.ctx.currentTime + 0.05;  // slight delay to avoid clicks
     const freq = this._midiHz(m);
-    const peak = (velocity ** 2) * 0.5;   // 主音色峰值
+    // 高频音量衰减
+    const pitchAtten = Math.pow(2, (60 - m) / 48);
+    // 限制最低衰减，避免最低音过大
+    const atten = Math.max(0.35, Math.min(1.6, pitchAtten));
+    const peak = (velocity ** 2) * 0.5 * atten;   // 主音色峰值
 
     // user envelope formulas
     const decayTime = Math.max(this.decay * 1.7 * Math.pow(2, (60 - m) / 18), 0.5);
