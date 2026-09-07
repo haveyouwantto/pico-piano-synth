@@ -21,6 +21,60 @@
 当前 v2 音色模型使用 `MIDI 音高 + 谐波 bank 标记` 作为 2 个输入，网络结构为
 `2 -> 24 -> 32`。两个 bank 分别预测低 32 和高 32 个谐波，合计最多 64 个谐波。
 
+--- 
+
+## 原理图
+
+```mermaid
+flowchart TD
+    MIDI["MIDI Input"]
+    MLP["MLP Harmonic Predictor"]
+    CACHE["WaveCache"]
+    WAVE["PeriodicWave"]
+    VOICE["Piano Voice"]
+    ENV["Envelope"]
+    ATTEN["Pitch Attenuation"]
+    FILTER["Filter"]
+    
+    BUFFER["Deterministic Noise Buffer"]
+    HAMMER["Hammer Noise"]
+    MIX["Audio Mix"]
+    DRY["Dry Gain"]
+    CONV["IR Convolver"]
+    WET["Wet Gain"]
+    MASTER["Master Gain"]
+    COMP["Compressor"]
+    OUT["Audio Output"]
+
+    MIDI --> MLP
+    MLP --> CACHE
+    CACHE --> WAVE
+    WAVE --> VOICE
+
+    MIDI --> ENV
+    MIDI --> ATTEN
+    MIDI --> FILTER
+
+    ENV --> VOICE
+    ATTEN --> VOICE
+    FILTER --> VOICE
+
+    BUFFER --> HAMMER
+    MIDI --> HAMMER
+
+    VOICE --> MIX
+    HAMMER --> MIX
+
+    MIX --> DRY
+    MIX --> CONV
+    CONV --> WET
+
+    DRY --> MASTER
+    WET --> MASTER
+    MASTER --> COMP
+    COMP --> OUT
+```
+
 ---
 
 ## 安装
