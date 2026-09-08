@@ -1,6 +1,6 @@
 # pico-piano-synth
 
-基于神经网络模型生成音色的轻量化 Web Audio 钢琴合成器。打包体积约 **8 KB**，核心音色由约 **0.9 KB** 的小型神经网络生成，**无需任何音频采样切片（Samples）**。
+基于神经网络模型生成音色的轻量化 Web Audio 钢琴合成器。打包体积约 **11 KB**，核心音色由约 **0.9 KB** 的小型神经网络生成，**无需任何音频采样切片（Samples）**。
 
 适合用于体积敏感的 Web 音频项目、交互式网页、虚拟键盘及 MIDI 接口对接。
 
@@ -10,10 +10,10 @@
 
 ## 特性
 
-* **极小体积**：压缩后全量代码约 8 KB（含 0.9 KB 内嵌神经网络模型）。
+* **极小体积**：压缩后全量代码约 11 KB（含 0.9 KB 内嵌神经网络模型）。
 * **逼真音色**：通过神经网络预测钢琴谐波结构，结合动态包络、击弦噪声和混响，获得自然的钢琴音色。
 * **纯算法合成**：无外部音频文件依赖，直接根据 MIDI 音高实时计算波形。
-* **完整音域支持**：覆盖 88 键标准钢琴音质（MIDI 21–108）。
+* **完整音域支持**：覆盖 88 键标准钢琴（MIDI 21–108）。
 * **表达力控制**：支持动态按键力度（Velocity）、延音踏板（Sustain Pedal）、主音量控制及混响调节。
 * **单文件即插即用**：提供内嵌模型的打包版本，开箱即用。
 * **零外部依赖**：原生基于浏览器 Web Audio API 开发。
@@ -33,7 +33,6 @@ flowchart TD
     WAVE["PeriodicWave"]
     VOICE["Piano Voice"]
     ENV["Envelope"]
-    ATTEN["Pitch Attenuation"]
     FILTER["Filter"]
     
     BUFFER["Deterministic Noise Buffer"]
@@ -52,11 +51,9 @@ flowchart TD
     WAVE --> VOICE
 
     MIDI --> ENV
-    MIDI --> ATTEN
     MIDI --> FILTER
 
     ENV --> VOICE
-    ATTEN --> VOICE
     FILTER --> VOICE
 
     BUFFER --> HAMMER
@@ -91,7 +88,7 @@ npm install pico-piano-synth
 ### 方式一：使用内嵌模型单文件（推荐）
 
 ```html
-<script src="https://unpkg.com/pico-piano-synth@0.2.2/dist/piano-synth-embedded.min.js"></script>
+<script src="https://unpkg.com/pico-piano-synth@0.3.0/dist/piano-synth-embedded.min.js"></script>
 
 <button id="play">播放</button>
 
@@ -118,11 +115,11 @@ document.getElementById("play").addEventListener("click", async () => {
 ### 方式二：分离式加载模型
 
 ```html
-<script src="https://unpkg.com/pico-piano-synth@0.2.2/dist/piano-synth.min.js"></script>
+<script src="https://unpkg.com/pico-piano-synth@0.3.0/dist/piano-synth.min.js"></script>
 
 <script>
 // 手动指定二进制模型文件 (.bin) 路径
-const synth = await PianoSynth.load("https://unpkg.com/pico-piano-synth@0.2.2/dist/piano_nn.bin");
+const synth = await PianoSynth.load("https://unpkg.com/pico-piano-synth@0.3.0/dist/piano_nn.bin");
 </script>
 
 ```
@@ -131,35 +128,55 @@ const synth = await PianoSynth.load("https://unpkg.com/pico-piano-synth@0.2.2/di
 
 ## API 参考
 
-### 静态方法
+### 创建
 
-* **`PianoSynth.load(url?: string): Promise<PianoSynth>`**
-异步初始化合成器。若不传 `url`，默认使用内嵌模型或默认路径。
-* **`PianoSynth.fromBinary(buffer: ArrayBuffer): Promise<PianoSynth>`**
-从二进制内存块直接解析初始化模型。
+* **`PianoSynth.load(url?, options?)`**
+  加载模型并创建合成器。不传 `url` 使用内置模型;传 `url` 从该地址加载。
+  需要自己管理音频输出时,`options` 里传 `audioContext`,并把 `autoConnect` 设为 `false`。
+* **`PianoSynth.fromBinary(buffer)`**
+  从模型二进制数据(`ArrayBuffer` / `Uint8Array`)创建合成器。
 
-### 实例方法
+### 演奏
 
-* **`synth.ensure(): void`**
-检查并恢复 `AudioContext` 运行状态。需放在事件监听函数内部以符合浏览器 Autoplay 策略。
-* **`synth.noteOn(note: number, velocity?: number): void`**
-触发指定音符。
-* `note`: MIDI 音高代码（`21` – `108`）。
-* `velocity`: 按键力度，取值 `0.0` – `1.0`（默认 `1.0`）。
+```js
+const synth = await PianoSynth.load();
+synth.ensure();        // 在用户手势回调里调用,解锁浏览器音频
+synth.noteOn(60, 0.8); // 弹一个音
+synth.noteOff(60);     // 松键
+```
 
+* **`synth.noteOn(note, velocity?, options?)`**
+  演奏一个音符,返回 `note` 便于原样 `noteOff`。`note` 是 MIDI 音高(可用小数表示微分音),`velocity` 是力度 `0`–`1`。
+  * `options.when`:到这个时刻才开始(秒)
+  * `options.duration`:到时自动收尾,无需再调 `noteOff`
+  * `options.detune`:音分微调
+  * `options.frequency`:直接指定频率(Hz)
+  * `options.onEnded`:该音符结束时回调 `(note, velocity)`
+* **`synth.noteOff(note)` / `synth.allNotesOff()`** 停止指定音符 / 停止全部。
+* **`synth.noteOnHz(frequency, velocity?, options?)` / `synth.noteOffHz(frequency)`** 直接按频率演奏和收尾。
+* **`synth.midiToHz(note)` / `synth.hzToMidi(frequency)`** 两种音高表示互转。
 
-* **`synth.noteOff(note: number): void`**
-关断指定 MIDI 音符。
-* **`synth.allNotesOff(): void`**
-切断当前所有正在响起的音符。
-* **`synth.setSustain(enable: boolean): void`**
-设置延音踏板状态。为 `true` 时抬起按键仍会维持余音。
-* **`synth.setVolume(volume: number): void`**
-设置主输出音量（取值 `0.0` – `1.0`）。
-* **`synth.setReverb(amount: number): void`**
-调节干湿比混响程度（取值 `0.0` – `1.0`）。
-* **`synth.loadIR(url: string): Promise<void>`**
-加载外部 WAV/MP3 脉冲响应（Impulse Response）文件，自定义混响空间效果。
+> 微分音:`note` 写成小数即可,例如 `60.5` 是中央 C 上方 50 cents。
+
+### 音色与控制
+
+* **`synth.setSustain(on)` / `synth.setVolume(v)`** 延音踏板 / 主音量。
+* **`synth.setReverb(amount)` / `synth.loadIR(url)`** 混响强弱 / 换成自定义脉冲响应。
+* **`synth.onNoteEnded = (note, velocity) => {}`** 监听任意音符结束。
+
+### 接入自己的音频链路
+
+默认会直接出声。要把声音送进自己的混音或效果链时:
+
+```js
+const synth = await PianoSynth.load(url, {
+  audioContext: myContext,
+  autoConnect: false
+});
+synth.output.connect(myMixer);
+```
+
+不再使用时调用 **`synth.dispose()`** 释放资源。
 
 ---
 

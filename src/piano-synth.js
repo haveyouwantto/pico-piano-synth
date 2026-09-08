@@ -8,20 +8,25 @@
  *   filterStart/Target/Decay as in the pluck model, gain = setTargetAtTime.
  *
  * Usage:
- *   const synth = new PianoSynth(PIANO_NN);
+ *   const synth = new PianoSynth(PIANO_NN, { audioContext });
  *   synth.ensure();            // after a user gesture
- *   synth.noteOn(midi, velocity01);
- *   synth.noteOff(midi);
+ *   synth.noteOn(60, 0.8);
+ *   synth.noteOff(60);
  */
 
 class PianoSynth {
-  constructor(model) {
+  constructor(model, options = {}) {
     this.model = model;
     this.layers = null;
-    this.ctx = null;
-    this.master = null;
 
-    // IR 混响相关节点
+    this.ctx = options.audioContext || null;
+    this._ownsContext = !this.ctx;
+    this._disposed = false;
+    this.master = null;
+    this.output = null;
+    this.compressor = null;
+    this._autoConnect = options.autoConnect !== false;
+
     this.dryGain = null;
     this.wetGain = null;
     this.convolver = null;
@@ -36,6 +41,7 @@ class PianoSynth {
     this.sustained = new Set();
     this.decay = 1.0;               // base decay (s), used by the formula
     this._vol = 0.8;
+    this.onNoteEnded = null;
     this._decodeModel();
   }
 
@@ -74,29 +80,28 @@ class PianoSynth {
     return { n_partials: nPartials, input_dim: inputDim, m_min: mMin, m_span: mSpan, layers };
   }
 
-  static async load(url) {
-    let buf = null;
-    if (!url && typeof PIANO_NN_B64 !== "undefined") {
-      const raw = atob(PIANO_NN_B64);
-      buf = new Uint8Array(raw.length);
-      for (let i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i);
-    } else {
-      try {
-        const res = await fetch(url);
-        if (!res.ok) throw new Error("fetch status " + res.status);
-        buf = await res.arrayBuffer();
-      } catch (e) {
-        if (typeof PIANO_NN_B64 === "undefined") throw e;
-        const raw = atob(PIANO_NN_B64);
-        buf = new Uint8Array(raw.length);
-        for (let i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i);
-      }
-    }
-    return PianoSynth.fromBinary(buf);
+  static _embeddedBuffer() {
+    if (typeof PIANO_NN_B64 === "undefined") return null;
+    const raw = atob(PIANO_NN_B64);
+    const buf = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) buf[i] = raw.charCodeAt(i);
+    return buf;
   }
 
-  static fromBinary(buf) {
-    return new PianoSynth(PianoSynth._parseBinary(buf));
+  static async load(url, options) {
+    const opts = options || {};
+    if (!url) {
+      const buf = PianoSynth._embeddedBuffer();
+      if (!buf) throw new Error("load() requires a model url when no embedded model is available");
+      return PianoSynth.fromBinary(buf, opts);
+    }
+    const res = await fetch(url);
+    if (!res.ok) throw new Error("failed to load model from " + url + ": HTTP " + res.status);
+    return PianoSynth.fromBinary(await res.arrayBuffer(), opts);
+  }
+
+  static fromBinary(buf, options) {
+    return new PianoSynth(PianoSynth._parseBinary(buf), options);
   }
 
   _q8(obj) {
@@ -126,18 +131,50 @@ class PianoSynth {
     return 440 * Math.pow(2, (m - 69) / 12);
   }
 
+  _noteNumber(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) {
+      throw new TypeError("note must be a finite number, got: " + value);
+    }
+    return Math.max(0, Math.min(127, n));
+  }
+
+  midiToHz(note) {
+    return this._midiHz(this._noteNumber(note));
+  }
+
+  hzToMidi(frequency) {
+    if (!Number.isFinite(frequency) || frequency <= 0) {
+      throw new TypeError("frequency must be a positive finite number, got: " + frequency);
+    }
+    return 69 + 12 * Math.log2(frequency / 440);
+  }
+
   ensure() {
-    if (!this.ctx) {
-      const AC = window.AudioContext || window.webkitAudioContext;
+    if (this._disposed) throw new Error("PianoSynth has been disposed");
+    if (this.ctx) {
+      if (this.ctx.state === "closed") {
+        throw new Error("AudioContext is closed");
+      }
+    } else {
+      const AC = (typeof window !== "undefined" &&
+        (window.AudioContext || window.webkitAudioContext)) ||
+        (typeof AudioContext !== "undefined" ? AudioContext : null);
+      if (!AC) throw new Error("Web Audio API is not available in this environment");
       this.ctx = new AC();
+      this._ownsContext = true;
+    }
+
+    if (!this.master) {
       this.master = this.ctx.createGain();
       this.master.gain.value = this._vol;
 
       this.compressor = this.ctx.createDynamicsCompressor();
+      this.output = this.ctx.createGain();
       this.master.connect(this.compressor);
-      this.compressor.connect(this.ctx.destination);
+      this.compressor.connect(this.output);
+      if (this._autoConnect) this.output.connect(this.ctx.destination);
 
-      // 创建 Dry / Wet 混响链路
       this.dryGain = this.ctx.createGain();
       this.wetGain = this.ctx.createGain();
       this.convolver = this.ctx.createConvolver();
@@ -148,10 +185,55 @@ class PianoSynth {
       this.convolver.connect(this.wetGain);
       this.wetGain.connect(this.master);
 
-      // 生成内置算法 IR 冲激响应，避免外置文件未加载时无声音
+      this._hammerNoiseBuffer = null;
       this._buildDefaultIR();
     }
     if (this.ctx.state === "suspended") this.ctx.resume();
+  }
+
+  connect(destination) {
+    this.ensure();
+    if (!destination) {
+      throw new TypeError("connect() expects an AudioNode or AudioParam destination");
+    }
+    if (this._autoConnect) {
+      this.output.disconnect(this.ctx.destination); // 避免双路输出
+      this._autoConnect = false;
+    }
+    this.output.connect(destination);
+  }
+
+  disconnect(destination) {
+    if (!this.output) return;
+    if (destination) this.output.disconnect(destination);
+    else this.output.disconnect();
+    if (!destination) this._autoConnect = false;
+  }
+
+  dispose() {
+    if (this._disposed) return;
+    this._disposed = true;
+    this.sustain = false;
+    this.sustained.clear();
+    if (this.ctx && this.ctx.state !== "closed") {
+      for (const m of [...this.active.keys()]) this._release(m);
+      for (const node of [this.master, this.compressor, this.output,
+        this.dryGain, this.wetGain, this.convolver]) {
+        if (node) node.disconnect();
+      }
+      if (this._ownsContext) this.ctx.close();
+    }
+    this.active.clear();
+    this.waveCache.clear();
+    this.envCache.clear();
+    this._hammerNoiseBuffer = null;
+    this.master = null;
+    this.compressor = null;
+    this.output = null;
+    this.dryGain = null;
+    this.wetGain = null;
+    this.convolver = null;
+    this.ctx = null;
   }
 
   // 算法合成琴房模拟冲激响应 (IR)
@@ -198,14 +280,13 @@ class PianoSynth {
     let last = 0;
     for (let i = 0; i < length; i++) {
       const white = rand() * 2 - 1;
-      data[i] = (last + 0.02 * white) / 1.02;   // 简单一阶滤波
+      data[i] = (last + 0.02 * white) / 1.02;
       last = data[i];
     }
     this._hammerNoiseBuffer = buffer;
     return buffer;
   }
 
-  // 加载外部真实 IR 音频文件 (WAV/MP3)
   async loadIR(url) {
     this.ensure();
     const res = await fetch(url);
@@ -224,7 +305,6 @@ class PianoSynth {
     };
   }
 
-  // 动态调节混响干湿比 (0.0 到 1.0)
   setReverb(wetRatio) {
     this._reverbWet = Math.max(0, Math.min(1, wetRatio));
     if (this.dryGain && this.wetGain) {
@@ -277,33 +357,42 @@ class PianoSynth {
       if (!banks.has(bank)) banks.set(bank, this._forward(m, bank));
       const env = banks.get(bank);
       const db = (h - 1) % bankSize < env.length ? env[(h - 1) % bankSize] : -200;
-      imag[h] = Math.pow(10, db / 20);      // raw dB -> amplitude, no cutoff
+      imag[h] = Math.pow(10, db / 20);
     }
-    const wave = this.ctx.createPeriodicWave(real, imag);   // default norm
+    const wave = this.ctx.createPeriodicWave(real, imag);
     this.waveCache.set(m, wave);
     return wave;
   }
 
-  noteOn(midi, velocity = 1) {
+  noteOn(midi, velocity = 1, options = {}) {
     this.ensure();
-    const m = Math.max(0, Math.min(127, midi));
+    const m = this._noteNumber(midi);
+    const vel = Number.isFinite(velocity) ? Math.max(0, Math.min(1, velocity)) : 1;
     this.sustained.delete(m);
     if (this.active.has(m)) this._release(m);
-    const now = this.ctx.currentTime + 0.05;  // slight delay to avoid clicks
-    const freq = this._midiHz(m);
-    const peak = (velocity ** 2) * 0.5 ;   // 主音色峰值
 
-    // user envelope formulas
+    const ctxNow = this.ctx.currentTime;
+    const startAt = Number.isFinite(options.when) && options.when >= ctxNow
+      ? options.when : ctxNow + 0.05;   // slight delay to avoid clicks
+    const duration = Number.isFinite(options.duration) ? Math.max(0, options.duration) : null;
+    const detune = Number.isFinite(options.detune) ? options.detune : 0;
+    const noteHz = this._midiHz(m);
+    const baseHz = Number.isFinite(options.frequency) && options.frequency > 0
+      ? options.frequency : noteHz;
+    const oscFreq = baseHz * Math.pow(2, detune / 1200);
+    const peak = (vel ** 2) * 0.5;
+
     const decayTime = Math.max(this.decay * 1.7 * Math.pow(2, (60 - m) / 18), 0.5);
-    const cutoffFreq = 492.35 * Math.exp(2.5 * velocity);
+    const cutoffFreq = 492.35 * Math.exp(2.5 * vel);
     const nyquist = this.ctx.sampleRate / 2;
     const filterStart = Math.min(cutoffFreq, nyquist);
     const filterTarget = Math.min(cutoffFreq * 0.1, nyquist);
     const filterDecay = decayTime / 3;
     const attack = 0.002;
+    const rel = 0.3;
 
     const osc = this.ctx.createOscillator();
-    osc.frequency.value = freq;
+    osc.frequency.value = oscFreq;
     osc.setPeriodicWave(this._buildWave(m));
 
     const filter = this.ctx.createBiquadFilter();
@@ -311,55 +400,83 @@ class PianoSynth {
     filter.Q.value = -1;  // Q < 0 means "no resonance" in WebAudio
     const g = this.ctx.createGain();
 
-    g.gain.setValueAtTime(0.0001, now);
-    g.gain.setTargetAtTime(peak, now, attack / 3);
-    g.gain.setTargetAtTime(0, now + attack, decayTime / 2);
-    filter.frequency.setValueAtTime(filterStart, now);
-    filter.frequency.setTargetAtTime(filterTarget, now + attack, filterDecay);
+    g.gain.setValueAtTime(0.0001, startAt);
+    g.gain.setTargetAtTime(peak, startAt, attack / 3);
+    if (duration !== null) {
+      g.gain.setTargetAtTime(0.0001, startAt + duration, rel / 3);
+    } else {
+      g.gain.setTargetAtTime(0, startAt + attack, decayTime / 2);
+    }
+    const endStop = duration !== null
+      ? startAt + duration + rel + 0.15
+      : startAt + attack + Math.max(decayTime * 4, 3.0);
+
+    filter.frequency.setValueAtTime(filterStart, startAt);
+    filter.frequency.setTargetAtTime(filterTarget, startAt + attack, filterDecay);
 
     osc.connect(filter);
     filter.connect(g);
 
-    // 将单音音频同时输出到直达声（Dry）和 IR 混响（Wet）节点
     g.connect(this.dryGain);
     g.connect(this.convolver);
 
-    osc.start(now);
-    osc.stop(now + attack + Math.max(decayTime * 4, 3.0));
+    osc.start(startAt);
+    osc.stop(endStop);
 
     // ========== Hammer 噪声层 ==========
     const noiseBuf = this._getHammerNoiseBuffer();
     const noiseSrc = this.ctx.createBufferSource();
     noiseSrc.buffer = noiseBuf;
 
-    // 滤波器：力度越大越亮
     const noiseFilter = this.ctx.createBiquadFilter();
     // 低音更闷一点，高音更亮
-    noiseFilter.frequency.value = freq + 500;
+    noiseFilter.frequency.value = baseHz + 500;
 
     const noiseGain = this.ctx.createGain();
     // 力度用二次曲线，更接近真实击弦动态
-    const hammerLevel = Math.pow(velocity, 2) * 3;
+    const hammerLevel = Math.pow(vel, 2) * 3;
 
     // 极快的起音 + 快速衰减（15~40ms）
-    const hammerDur = 0.016 + velocity * 0.028;
-    noiseGain.gain.setValueAtTime(0, now);
-    noiseGain.gain.linearRampToValueAtTime(hammerLevel, now + 0.0012);
-    noiseGain.gain.exponentialRampToValueAtTime(0.0001, now + hammerDur);
+    const hammerDur = 0.016 + vel * 0.028;
+    noiseGain.gain.setValueAtTime(0, startAt);
+    noiseGain.gain.linearRampToValueAtTime(hammerLevel, startAt + 0.0012);
+    noiseGain.gain.exponentialRampToValueAtTime(0.0001, startAt + hammerDur);
 
     noiseSrc.connect(noiseFilter);
     noiseFilter.connect(noiseGain);
     noiseGain.connect(this.dryGain);
     noiseGain.connect(this.convolver);   // 也送进 IR，空间感一致
 
-    noiseSrc.start(now);
-    noiseSrc.stop(now + hammerDur + 0.02);
+    noiseSrc.start(startAt);
+    noiseSrc.stop(startAt + hammerDur + 0.02);
 
-    this.active.set(m, { osc, gain: g, decayTime, stopped: false });
+    const voice = {
+      osc,
+      gain: g,
+      note: m,
+      velocity: vel,
+      startAt,
+      decayTime,
+      stopped: false,
+      ended: false,
+      onEnded: typeof options.onEnded === "function" ? options.onEnded : null
+    };
+    osc.onended = () => this._finishVoice(m, voice);
+    this.active.set(m, voice);
+    return m;
+  }
+
+  noteOnHz(frequency, velocity = 1, options = {}) {
+    const m = this.hzToMidi(frequency);
+    return this.noteOn(m, velocity, Object.assign({}, options, { frequency }));
+  }
+
+  noteOffHz(frequency) {
+    return this.noteOff(this.hzToMidi(frequency));
   }
 
   noteOff(midi) {
-    const m = Math.max(0, Math.min(127, midi));
+    const m = this._noteNumber(midi);
     if (this.sustain && this.active.has(m)) {
       this.sustained.add(m);          // pedal down: keep the note ringing
       return;
@@ -368,17 +485,30 @@ class PianoSynth {
   }
 
   _release(midi) {
-    const m = Math.max(0, Math.min(127, midi));
-    const a = this.active.get(m);
-    if (!a || a.stopped) return;
-    a.stopped = true;
+    const m = this._noteNumber(midi);
+    const voice = this.active.get(m);
+    if (!voice || voice.stopped || voice.ended) return;
+    voice.stopped = true;
     const now = this.ctx.currentTime;
     const rel = 0.3;                    // 固定 0.3 s release
-    try {
-      a.gain.gain.setTargetAtTime(0.0001, now, rel / 3);
-      a.osc.stop(now + rel + 0.15);
-    } catch (e) { }
-    this.active.delete(m);
+    if (now < voice.startAt) {
+      voice.gain.gain.cancelScheduledValues(now);
+    }
+    voice.gain.gain.setTargetAtTime(0.0001, Math.max(now, voice.startAt), rel / 3);
+    this._finishVoice(m, voice);
+  }
+
+  _finishVoice(m, voice) {
+    if (voice.ended) return;
+    voice.ended = true;
+    if (this.active.get(m) === voice) this.active.delete(m);
+    if (voice.onEnded) {
+      voice.onEnded(m, voice.velocity);
+      voice.onEnded = null;
+    }
+    if (typeof this.onNoteEnded === "function") {
+      this.onNoteEnded(m, voice.velocity);
+    }
   }
 
   setSustain(down) {
