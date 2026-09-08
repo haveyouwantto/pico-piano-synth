@@ -423,12 +423,74 @@
       border: 2px solid rgba(255, 255, 255, 0.15);
       cursor: progress;
     }
-    #exportPercent {
-      color: #8fd3ff;
-      font-size: 12px;
-      min-width: 44px;
-      text-align: right;
+      #exportPercent {
+        color: #8fd3ff;
+        font-size: 12px;
+        min-width: 44px;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+      }
+
+    .hw-display {
+      margin-top: 10px;
+      padding: 10px 16px;
+      border-radius: 10px;
+      background: linear-gradient(#0c1411, #070c09);
+      border: 1px solid #22312a;
+      box-shadow:
+        inset 0 0 24px rgba(0, 0, 0, 0.85),
+        inset 0 0 4px rgba(80, 255, 160, 0.08),
+        0 6px 14px rgba(0, 0, 0, 0.5);
+      font-family: "Consolas", "Lucida Console", "Courier New", monospace;
+      display: flex;
+      flex-wrap: wrap;
+      row-gap: 8px;
+      column-gap: 26px;
+      align-items: baseline;
+    }
+    .hw-cell {
+      display: flex;
+      gap: 8px;
+      align-items: baseline;
+    }
+    .hw-label {
+      font-size: 10px;
+      letter-spacing: 1.5px;
+      color: #3f6b54;
+    }
+    .hw-value {
+      font-size: 17px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      color: #8fffc2;
+      text-shadow: 0 0 7px rgba(80, 255, 170, 0.65);
       font-variant-numeric: tabular-nums;
+    }
+    .hw-value.off {
+      color: #33503f;
+      text-shadow: none;
+    }
+    .hw-status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-left: auto;
+    }
+    .hw-led {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #1c2a23;
+      box-shadow: inset 0 0 2px rgba(0, 0, 0, 0.9);
+    }
+    .hw-led.on {
+      background: #4dff8a;
+      box-shadow: 0 0 9px rgba(77, 255, 138, 0.85);
+    }
+    .hw-status-text {
+      font-size: 10px;
+      letter-spacing: 2px;
+      color: #4c8a68;
     }
 
     /* ---------- 键盘容器 ---------- */
@@ -680,6 +742,20 @@
         <span id="exportLabel">等待导出</span>
         <input id="exportProgress" type="range" min="0" max="1000" step="1" value="0" disabled>
         <span id="exportPercent">0%</span>
+      </div>
+    </div>
+    <div class="hw-display">
+      <div class="hw-cell"><span class="hw-label">TIME</span><span class="hw-value off" id="hwTime">--</span></div>
+      <div class="hw-cell"><span class="hw-label">POLY</span><span class="hw-value off" id="hwPoly">--</span></div>
+      <div class="hw-cell"><span class="hw-label">SUSTAIN</span><span class="hw-value off" id="hwSustain">--</span></div>
+      <div class="hw-cell"><span class="hw-label">RELEASE</span><span class="hw-value off" id="hwRelease">--</span></div>
+      <div class="hw-cell"><span class="hw-label">WAVE</span><span class="hw-value off" id="hwWave">--</span></div>
+      <div class="hw-cell"><span class="hw-label">ENV</span><span class="hw-value off" id="hwEnv">--</span></div>
+      <div class="hw-cell"><span class="hw-label">VOL</span><span class="hw-value off" id="hwVol">--</span></div>
+      <div class="hw-cell"><span class="hw-label">REV</span><span class="hw-value off" id="hwRev">--</span></div>
+      <div class="hw-status">
+        <span class="hw-led" id="hwLed"></span>
+        <span class="hw-status-text" id="hwState">STANDBY</span>
       </div>
     </div>
     <div id="kb">
@@ -986,8 +1062,8 @@
       const scheduleAhead = 0.25;
       let schedulePumpTimer = null;
       let scheduleEvCursor = 0;
-      let scheduleHeld = new Map();     // 当前在响的音符 note -> velocity
-      let scheduleWaiting = new Set();  // 已收到 NoteOff、正在等踏板抬起的音符
+      let scheduleHeld = new Map();
+      let scheduleWaiting = new Set();
       let schedulePedalDown = false;
       let scheduleAnchorCtx = 0;
       let scheduleAnchorPos = 0;
@@ -1024,7 +1100,7 @@
         if (ev.command === 0x80 || (ev.command === 0x90 && ev.value === 0)) {
           if (!scheduleHeld.has(note)) return;
           if (schedulePedalDown) {
-            scheduleWaiting.add(note);  // 延音:等下一个踏板抬起再释放
+            scheduleWaiting.add(note);
           } else {
             scheduleRelease(note, at);
           }
@@ -1040,7 +1116,6 @@
         }
       }
 
-      // 重放 position 之前的事件来恢复播放状态(延音中的音符仍保留)
       function restoreState(position) {
         scheduleEvCursor = 0;
         scheduleHeld.clear();
@@ -1304,7 +1379,6 @@
               renderer.noteOn(seg.note, seg.vel, seg.start);
               renderer.noteOff(seg.note, seg.start + seg.dur);
               cursor++;
-              console.log(cursor)
             }
           };
           for (let t = tick; t < total - 0.001; t += tick) offline.suspend(t);
@@ -1338,6 +1412,52 @@
       }
 
       exportWavBtn.addEventListener("click", exportSongToWav);
+
+      const hwTime = document.getElementById("hwTime");
+      const hwPoly = document.getElementById("hwPoly");
+      const hwSustain = document.getElementById("hwSustain");
+      const hwRelease = document.getElementById("hwRelease");
+      const hwWave = document.getElementById("hwWave");
+      const hwEnv = document.getElementById("hwEnv");
+      const hwVol = document.getElementById("hwVol");
+      const hwRev = document.getElementById("hwRev");
+      const hwLed = document.getElementById("hwLed");
+      const hwState = document.getElementById("hwState");
+      let hwLastTick = 0;
+
+      function setHwValue(el, value) {
+        el.textContent = value;
+        el.classList.toggle("off", false);
+      }
+
+      function refreshHwDisplay(now) {
+        if (now - hwLastTick >= 100) {
+          hwLastTick = now;
+          if (synth && synth.ctx) {
+            const m = synth.metrics;
+            setHwValue(hwTime, m.time.toFixed(2));
+            setHwValue(hwPoly, m.polyphony);
+            setHwValue(hwSustain, m.sustained);
+            setHwValue(hwRelease, m.scheduledReleases);
+            setHwValue(hwWave, m.waveCache);
+            setHwValue(hwEnv, m.envCache);
+            setHwValue(hwVol, m.volume.toFixed(2));
+            setHwValue(hwRev, m.reverb.toFixed(2));
+            hwLed.classList.toggle("on", m.state === "running");
+            hwState.textContent = m.state === "running" ? "RUN"
+              : m.state === "suspended" ? "PAUSE" : "STOP";
+          } else {
+            for (const el of [hwTime, hwPoly, hwSustain, hwRelease, hwWave, hwEnv, hwVol, hwRev]) {
+              el.textContent = "--";
+              el.classList.toggle("off", true);
+            }
+            hwLed.classList.remove("on");
+            hwState.textContent = "STANDBY";
+          }
+        }
+        requestAnimationFrame(refreshHwDisplay);
+      }
+      requestAnimationFrame(refreshHwDisplay);
     </script>
   </main>
 </body>

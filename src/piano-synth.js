@@ -19,8 +19,6 @@ const RELEASE_SEC = 0.3;
 const CYCLE_SAMPLES = 2048;
 const WAVE_CACHE_MAX = 128;
 
-// Cooley-Tukey Radix-2 IFFT(就地,输入长度须为 2 的幂)。
-// 逆变换带 1/N 归一化,结果实部写入 re。
 function fftInverse(re, im) {
   const n = re.length;
   for (let i = 1, j = 0; i < n; i++) {
@@ -76,9 +74,10 @@ class PianoSynth {
     this.waveCache = new Map();
     this.envCache = new Map();
     this.active = new Map();
+    this.playing = new Set();
     this.sustain = false;
     this.sustained = new Set();
-    this.decay = 1.0;               // base decay (s), used by the formula
+    this.decay = 1.0;
     this._vol = 0.8;
     this.onNoteEnded = null;
     this._decodeModel();
@@ -156,7 +155,8 @@ class PianoSynth {
     for (const raw of this.model.layers) {
       const wq = this._q8(raw.w);
       const bq = this._q8(raw.b);
-      const rows = raw.w.q.length / prev;   // row-major, each row len=prev
+      // 权重按行主序导出,故行数 = 权重数 / 输入维数
+      const rows = raw.w.q.length / prev;
       const w = [];
       for (let r = 0; r < rows; r++) {
         w.push(wq.subarray(r * prev, (r + 1) * prev));
@@ -263,6 +263,7 @@ class PianoSynth {
       if (this._ownsContext) this.ctx.close();
     }
     this.active.clear();
+    this.playing.clear();
     this.waveCache.clear();
     this.envCache.clear();
     this._hammerNoiseBuffer = null;
@@ -275,10 +276,10 @@ class PianoSynth {
     this.ctx = null;
   }
 
-  // 算法合成琴房模拟冲激响应 (IR)
+  // 未加载外部 IR 时也能保留房间混响
   _buildDefaultIR(durationSeconds = 1.6, decay = 50.0) {
     if (!this.ctx) return;
-    const rand = this._createPrng(411); // 固定 IR 采样种子
+    const rand = this._createPrng(411); // 固定种子,每次结果一致
     const sampleRate = this.ctx.sampleRate;
     const length = Math.floor(sampleRate * durationSeconds);
     const buffer = this.ctx.createBuffer(2, length, sampleRate);
@@ -308,7 +309,7 @@ class PianoSynth {
   _getHammerNoiseBuffer() {
     if (this._hammerNoiseBuffer) return this._hammerNoiseBuffer;
 
-    const rand = this._createPrng(42); // 固定 Hammer 噪声种子
+    const rand = this._createPrng(42);  // 固定种子,每次结果一致
     const duration = 0.08;          // 足够长，后面用 gain 截断
     const sampleRate = this.ctx.sampleRate;
     const length = Math.floor(sampleRate * duration);
@@ -333,7 +334,6 @@ class PianoSynth {
     this.convolver.buffer = await this.ctx.decodeAudioData(arrayBuffer);
   }
 
-  // Mulberry32 确定性伪随机数生成器 (返回 0 到 1 之间的浮点数)
   _createPrng(seed = 123456789) {
     let s = seed >>> 0;
     return function () {
@@ -355,6 +355,27 @@ class PianoSynth {
   setVolume(v) {
     this._vol = v;
     if (this.master) this.master.gain.value = v;
+  }
+
+  // 只读观测快照:运行状态与资源占用
+  get metrics() {
+    let scheduledReleases = 0;
+    for (const voice of this.active.values()) {
+      if (voice.releaseAt !== null) scheduledReleases++;
+    }
+    const ctx = this.ctx;
+    return {
+      time: ctx ? ctx.currentTime : 0,
+      state: ctx ? ctx.state : "none",
+      sampleRate: ctx ? ctx.sampleRate : 0,
+      polyphony: this.playing.size,
+      sustained: this.sustained.size,
+      scheduledReleases,
+      waveCache: this.waveCache.size,
+      envCache: this.envCache.size,
+      volume: this._vol,
+      reverb: this._reverbWet
+    };
   }
 
   _forward(m, bank = 0) {
@@ -388,7 +409,7 @@ class PianoSynth {
     if (this.waveCache.has(m)) {
       const hit = this.waveCache.get(m);
       this.waveCache.delete(m);
-      this.waveCache.set(m, hit);   // LRU touch
+      this.waveCache.set(m, hit);
       return hit;
     }
     const N = this._maxPartial(m);
@@ -403,7 +424,7 @@ class PianoSynth {
       imag[h] = Math.pow(10, db / 20);
     }
 
-    // 只有 sin 分量,放入共轭对称频域后做 Cooley-Tukey IFFT
+    // 谐波频谱直接 IFFT 成时域,避免逐采样叠加
     const len = CYCLE_SAMPLES;
     const re = new Float64Array(len);
     const im = new Float64Array(len);
@@ -438,8 +459,7 @@ class PianoSynth {
     this.sustained.delete(m);
     const existing = this.active.get(m);
     if (existing && !existing.ended) {
-      // 同键重触发:若旧 voice 尚未到起音时间(排程场景),保留其自身发声,
-      // 只替换登记;已在响的才立即释放并重新起音
+      // 同键重触发:尚未起音的旧 voice 无需提前释放,已响的才重新起音
       if (this.ctx.currentTime >= existing.startAt) this._release(m);
     }
 
@@ -464,7 +484,6 @@ class PianoSynth {
     const source = this.ctx.createBufferSource();
     source.buffer = this._buildWave(m);
     source.loop = true;
-    // buffer 是 CYCLE_SAMPLES 长的单周期,目标基频由 playbackRate 决定
     source.playbackRate.value = (oscFreq * CYCLE_SAMPLES) / this.ctx.sampleRate;
 
     const filter = this.ctx.createBiquadFilter();
@@ -475,7 +494,7 @@ class PianoSynth {
     g.gain.setValueAtTime(0.0001, startAt);
     g.gain.setTargetAtTime(peak, startAt, attack / 3);
     g.gain.setTargetAtTime(0, startAt + attack, decayTime / 2);
-    const endStop = startAt + attack + Math.max(decayTime * 4, 3.0);
+    const naturalEnd = startAt + attack + Math.max(decayTime * 4, 3.0);
 
     filter.frequency.setValueAtTime(filterStart, startAt);
     filter.frequency.setTargetAtTime(filterTarget, startAt + attack, filterDecay);
@@ -487,9 +506,7 @@ class PianoSynth {
     g.connect(this.convolver);
 
     source.start(startAt);
-    source.stop(endStop);
 
-    // ========== Hammer 噪声层 ==========
     const noiseBuf = this._getHammerNoiseBuffer();
     const noiseSrc = this.ctx.createBufferSource();
     noiseSrc.buffer = noiseBuf;
@@ -526,11 +543,30 @@ class PianoSynth {
       peak,
       releaseAt: null,
       releaseTimer: null,
+      sourceStopped: false,
+      stopTimer: null,
       stopped: false,
       ended: false,
       onEnded: typeof options.onEnded === "function" ? options.onEnded : null
     };
-    source.onended = () => this._finishVoice(m, voice);
+    // 兜底:一直没被 noteOff 的音符在自然衰减结束后停掉 source
+    const stopAtNaturalEnd = () => {
+      if (voice.sourceStopped || voice.ended || voice.stopped) return;
+      if (this.ctx.state !== "running") {
+        voice.stopTimer = setTimeout(stopAtNaturalEnd, 250);
+        return;
+      }
+      this._stopSource(voice, this.ctx.currentTime);
+    };
+    voice.stopTimer = setTimeout(
+      stopAtNaturalEnd,
+      Math.max(0, naturalEnd - this.ctx.currentTime) * 1000
+    );
+    this.playing.add(source);
+    source.onended = () => {
+      this.playing.delete(source);
+      this._finishVoice(m, voice);
+    };
     this.active.set(m, voice);
     return m;
   }
@@ -573,6 +609,7 @@ class PianoSynth {
     this._clearReleaseSchedule(voice);
     voice.stopped = true;
     this._applyReleaseRamp(voice, now);
+    this._stopSource(voice, Math.max(now + RELEASE_SEC + 0.15, voice.startAt + 0.02));
     this._finishVoice(m, voice);
   }
 
@@ -583,10 +620,10 @@ class PianoSynth {
     voice.releaseAt = null;
   }
 
-  // 在指定 ctx 时刻预排释放,避免释放时机依赖调用时的 currentTime
   _scheduleRelease(m, voice, at) {
     if (voice.releaseAt === at) return;
     this._applyReleaseRamp(voice, at);
+    this._stopSource(voice, Math.max(at + RELEASE_SEC + 0.15, voice.startAt + 0.02));
     voice.releaseAt = at;
     clearTimeout(voice.releaseTimer);
     const finishDelay = Math.max(0, at + RELEASE_SEC - this.ctx.currentTime) * 1000;
@@ -597,7 +634,13 @@ class PianoSynth {
     }, finishDelay);
   }
 
-  // 从 at 时刻起平滑收向静音(立即释放时先钳掉取消 automation 后回落的默认值)
+  _stopSource(voice, at) {
+    if (voice.sourceStopped) return;
+    voice.sourceStopped = true;
+    clearTimeout(voice.stopTimer);
+    voice.source.stop(at);
+  }
+  
   _applyReleaseRamp(voice, at) {
     const level = Math.max(this._gainAt(voice, at), 0.0001);
     const gain = voice.gain.gain;
@@ -611,7 +654,6 @@ class PianoSynth {
     gain.setTargetAtTime(0.0001, at + ATTACK_SEC, RELEASE_SEC / 3);
   }
 
-  // gain 包络:t < startAt 视为 peak;此后自然衰减,预排了 release 则走释放段
   _gainAt(voice, t) {
     const startAt = voice.startAt;
     if (t < startAt) return voice.peak;

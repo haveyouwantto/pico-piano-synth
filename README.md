@@ -162,6 +162,7 @@ synth.noteOff(60);     // 松键
 * **`synth.setSustain(on)` / `synth.setVolume(v)`** 延音踏板 / 主音量。
 * **`synth.setReverb(amount)` / `synth.loadIR(url)`** 混响强弱 / 换成自定义脉冲响应。
 * **`synth.onNoteEnded = (note, velocity) => {}`** 监听任意音符结束。
+* **`synth.metrics`** 只读观测快照:当前 `time`、`polyphony`(仍在播放的 voice 数,含释放尾音)、`sustained`、`waveCache`/`envCache` 缓存大小、音量与混响值等。
 
 ### 接入自己的音频链路
 
