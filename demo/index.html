@@ -927,7 +927,7 @@
         }
 
         const events = [];
-        const tempos = [{ tick: 0, microsecondsPerBeat: 500000 }];
+        let tempos = [{ tick: 0, microsecondsPerBeat: 500000 }];
         for (const track of tracks) {
           const state = { offset: track.start };
           let tick = 0;
@@ -974,11 +974,12 @@
         tempos.sort((a, b) => a.tick - b.tick);
         const tempoMap = new Map();
         tempos.forEach(tempo => tempoMap.set(tempo.tick, tempo));
-        tempos.splice(0, tempos.length, ...[...tempoMap.values()].sort((a, b) => a.tick - b.tick));
+        tempos = [...tempoMap.values()].sort((a, b) => a.tick - b.tick);
         events.sort((a, b) => a.tick - b.tick);
         let lastTick = 0;
         let elapsed = 0;
         let tempoIndex = 0;
+        let duration = 0;
         for (const event of events) {
           while (tempoIndex + 1 < tempos.length && tempos[tempoIndex + 1].tick <= event.tick) {
             const nextTempo = tempos[++tempoIndex];
@@ -986,8 +987,8 @@
             lastTick = nextTempo.tick;
           }
           event.time = (elapsed + (event.tick - lastTick) * tempos[tempoIndex].microsecondsPerBeat / division) / 1000000;
+          if (event.time > duration) duration = event.time;
         }
-        const duration = events.length ? Math.max(...events.map(e => e.time)) : 0;
         return { events, duration, format, trackCount, tempoChanges: Math.max(0, tempos.length - 1) };
       }
 
