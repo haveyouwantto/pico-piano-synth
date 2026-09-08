@@ -16,39 +16,7 @@
 
 const ATTACK_SEC = 0.002;
 const RELEASE_SEC = 0.3;
-const CYCLE_SAMPLES = 2048;
 const WAVE_CACHE_MAX = 128;
-
-function fftInverse(re, im) {
-  const n = re.length;
-  for (let i = 1, j = 0; i < n; i++) {
-    let bit = n >> 1;
-    for (; j & bit; bit >>= 1) j ^= bit;
-    j ^= bit;
-    if (i < j) {
-      const tr = re[i]; re[i] = re[j]; re[j] = tr;
-      const ti = im[i]; im[i] = im[j]; im[j] = ti;
-    }
-  }
-  for (let size = 2; size <= n; size <<= 1) {
-    const half = size >> 1;
-    const angleStep = (2 * Math.PI) / size;
-    for (let i = 0; i < n; i += size) {
-      for (let j = i, k = 0; j < i + half; j++, k++) {
-        const angle = angleStep * k;
-        const wr = Math.cos(angle);
-        const wi = Math.sin(angle);
-        const tr = wr * re[j + half] - wi * im[j + half];
-        const ti = wr * im[j + half] + wi * re[j + half];
-        re[j + half] = re[j] - tr;
-        im[j + half] = im[j] - ti;
-        re[j] += tr;
-        im[j] += ti;
-      }
-    }
-  }
-  for (let i = 0; i < n; i++) re[i] /= n;
-}
 
 class PianoSynth {
   constructor(model, options = {}) {
@@ -424,32 +392,13 @@ class PianoSynth {
       imag[h] = Math.pow(10, db / 20);
     }
 
-    // 谐波频谱直接 IFFT 成时域,避免逐采样叠加
-    const len = CYCLE_SAMPLES;
-    const re = new Float64Array(len);
-    const im = new Float64Array(len);
-    for (let h = 1; h <= N && h < len; h++) {
-      const amp = imag[h];
-      if (!amp) continue;
-      im[h] = -amp / 2;
-      im[len - h] = amp / 2;
-    }
-    fftInverse(re, im);
-    const buffer = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
-    const data = buffer.getChannelData(0);
-    for (let n = 0; n < len; n++) data[n] = re[n];
-    // 归一化到接近满幅,避免削波
-    let peak = 0;
-    for (let n = 0; n < len; n++) peak = Math.max(peak, Math.abs(data[n]));
-    if (peak > 0) {
-      const gain = 0.9 / peak;
-      for (let n = 0; n < len; n++) data[n] *= gain;
-    }
-    this.waveCache.set(m, buffer);
+    const real = new Float32Array(N + 1);
+    const wave = this.ctx.createPeriodicWave(real, imag);
+    this.waveCache.set(m, wave);
     if (this.waveCache.size > WAVE_CACHE_MAX) {
       this.waveCache.delete(this.waveCache.keys().next().value);
     }
-    return buffer;
+    return wave;
   }
 
   noteOn(midi, velocity = 1, time, options = {}) {
@@ -481,10 +430,9 @@ class PianoSynth {
     const filterDecay = decayTime / 3;
     const attack = ATTACK_SEC;
 
-    const source = this.ctx.createBufferSource();
-    source.buffer = this._buildWave(m);
-    source.loop = true;
-    source.playbackRate.value = (oscFreq * CYCLE_SAMPLES) / this.ctx.sampleRate;
+    const source = this.ctx.createOscillator();
+    source.frequency.value = oscFreq;
+    source.setPeriodicWave(this._buildWave(m));
 
     const filter = this.ctx.createBiquadFilter();
     filter.type = "lowpass";
