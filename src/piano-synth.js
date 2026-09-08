@@ -16,6 +16,41 @@
 
 const ATTACK_SEC = 0.002;
 const RELEASE_SEC = 0.3;
+const CYCLE_SAMPLES = 2048;
+const WAVE_CACHE_MAX = 128;
+
+// Cooley-Tukey Radix-2 IFFT(就地,输入长度须为 2 的幂)。
+// 逆变换带 1/N 归一化,结果实部写入 re。
+function fftInverse(re, im) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      const tr = re[i]; re[i] = re[j]; re[j] = tr;
+      const ti = im[i]; im[i] = im[j]; im[j] = ti;
+    }
+  }
+  for (let size = 2; size <= n; size <<= 1) {
+    const half = size >> 1;
+    const angleStep = (2 * Math.PI) / size;
+    for (let i = 0; i < n; i += size) {
+      for (let j = i, k = 0; j < i + half; j++, k++) {
+        const angle = angleStep * k;
+        const wr = Math.cos(angle);
+        const wi = Math.sin(angle);
+        const tr = wr * re[j + half] - wi * im[j + half];
+        const ti = wr * im[j + half] + wi * re[j + half];
+        re[j + half] = re[j] - tr;
+        im[j + half] = im[j] - ti;
+        re[j] += tr;
+        im[j] += ti;
+      }
+    }
+  }
+  for (let i = 0; i < n; i++) re[i] /= n;
+}
 
 class PianoSynth {
   constructor(model, options = {}) {
@@ -350,9 +385,13 @@ class PianoSynth {
   }
 
   _buildWave(m) {
-    if (this.waveCache.has(m)) return this.waveCache.get(m);
+    if (this.waveCache.has(m)) {
+      const hit = this.waveCache.get(m);
+      this.waveCache.delete(m);
+      this.waveCache.set(m, hit);   // LRU touch
+      return hit;
+    }
     const N = this._maxPartial(m);
-    const real = new Float32Array(N + 1);
     const imag = new Float32Array(N + 1);
     const bankSize = this.model.input_dim === 2 ? 32 : this.model.n_partials;
     const banks = new Map();
@@ -363,22 +402,50 @@ class PianoSynth {
       const db = (h - 1) % bankSize < env.length ? env[(h - 1) % bankSize] : -200;
       imag[h] = Math.pow(10, db / 20);
     }
-    const wave = this.ctx.createPeriodicWave(real, imag);
-    this.waveCache.set(m, wave);
-    return wave;
+
+    // 只有 sin 分量,放入共轭对称频域后做 Cooley-Tukey IFFT
+    const len = CYCLE_SAMPLES;
+    const re = new Float64Array(len);
+    const im = new Float64Array(len);
+    for (let h = 1; h <= N && h < len; h++) {
+      const amp = imag[h];
+      if (!amp) continue;
+      im[h] = -amp / 2;
+      im[len - h] = amp / 2;
+    }
+    fftInverse(re, im);
+    const buffer = this.ctx.createBuffer(1, len, this.ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let n = 0; n < len; n++) data[n] = re[n];
+    // 归一化到接近满幅,避免削波
+    let peak = 0;
+    for (let n = 0; n < len; n++) peak = Math.max(peak, Math.abs(data[n]));
+    if (peak > 0) {
+      const gain = 0.9 / peak;
+      for (let n = 0; n < len; n++) data[n] *= gain;
+    }
+    this.waveCache.set(m, buffer);
+    if (this.waveCache.size > WAVE_CACHE_MAX) {
+      this.waveCache.delete(this.waveCache.keys().next().value);
+    }
+    return buffer;
   }
 
-  noteOn(midi, velocity = 1, options = {}) {
+  noteOn(midi, velocity = 1, time, options = {}) {
     this.ensure();
     const m = this._noteNumber(midi);
     const vel = Number.isFinite(velocity) ? Math.max(0, Math.min(1, velocity)) : 1;
     this.sustained.delete(m);
-    if (this.active.has(m)) this._release(m);
+    const existing = this.active.get(m);
+    if (existing && !existing.ended) {
+      // 同键重触发:若旧 voice 尚未到起音时间(排程场景),保留其自身发声,
+      // 只替换登记;已在响的才立即释放并重新起音
+      if (this.ctx.currentTime >= existing.startAt) this._release(m);
+    }
 
     const ctxNow = this.ctx.currentTime;
-    const startAt = Number.isFinite(options.when) && options.when >= ctxNow
-      ? options.when : ctxNow + 0.05;   // slight delay to avoid clicks
-    const duration = Number.isFinite(options.duration) ? Math.max(0, options.duration) : null;
+    const startAt = Number.isFinite(time) && time >= ctxNow
+      ? time : ctxNow + 0.05;   // 未指定 time 时稍延迟起音,避免爆音
     const detune = Number.isFinite(options.detune) ? options.detune : 0;
     const noteHz = this._midiHz(m);
     const baseHz = Number.isFinite(options.frequency) && options.frequency > 0
@@ -393,11 +460,12 @@ class PianoSynth {
     const filterTarget = Math.min(cutoffFreq * 0.1, nyquist);
     const filterDecay = decayTime / 3;
     const attack = ATTACK_SEC;
-    const rel = RELEASE_SEC;
 
-    const osc = this.ctx.createOscillator();
-    osc.frequency.value = oscFreq;
-    osc.setPeriodicWave(this._buildWave(m));
+    const source = this.ctx.createBufferSource();
+    source.buffer = this._buildWave(m);
+    source.loop = true;
+    // buffer 是 CYCLE_SAMPLES 长的单周期,目标基频由 playbackRate 决定
+    source.playbackRate.value = (oscFreq * CYCLE_SAMPLES) / this.ctx.sampleRate;
 
     const filter = this.ctx.createBiquadFilter();
     filter.type = "lowpass";
@@ -406,26 +474,20 @@ class PianoSynth {
 
     g.gain.setValueAtTime(0.0001, startAt);
     g.gain.setTargetAtTime(peak, startAt, attack / 3);
-    if (duration !== null) {
-      g.gain.setTargetAtTime(0.0001, startAt + duration, rel / 3);
-    } else {
-      g.gain.setTargetAtTime(0, startAt + attack, decayTime / 2);
-    }
-    const endStop = duration !== null
-      ? startAt + duration + rel + 0.15
-      : startAt + attack + Math.max(decayTime * 4, 3.0);
+    g.gain.setTargetAtTime(0, startAt + attack, decayTime / 2);
+    const endStop = startAt + attack + Math.max(decayTime * 4, 3.0);
 
     filter.frequency.setValueAtTime(filterStart, startAt);
     filter.frequency.setTargetAtTime(filterTarget, startAt + attack, filterDecay);
 
-    osc.connect(filter);
+    source.connect(filter);
     filter.connect(g);
 
     g.connect(this.dryGain);
     g.connect(this.convolver);
 
-    osc.start(startAt);
-    osc.stop(endStop);
+    source.start(startAt);
+    source.stop(endStop);
 
     // ========== Hammer 噪声层 ==========
     const noiseBuf = this._getHammerNoiseBuffer();
@@ -455,67 +517,111 @@ class PianoSynth {
     noiseSrc.stop(startAt + hammerDur + 0.02);
 
     const voice = {
-      osc,
+      source,
       gain: g,
       note: m,
       velocity: vel,
       startAt,
       decayTime,
       peak,
-      duration,
+      releaseAt: null,
+      releaseTimer: null,
       stopped: false,
       ended: false,
       onEnded: typeof options.onEnded === "function" ? options.onEnded : null
     };
-    osc.onended = () => this._finishVoice(m, voice);
+    source.onended = () => this._finishVoice(m, voice);
     this.active.set(m, voice);
     return m;
   }
 
-  noteOnHz(frequency, velocity = 1, options = {}) {
+  noteOnHz(frequency, velocity = 1, time, options = {}) {
     const m = this.hzToMidi(frequency);
-    return this.noteOn(m, velocity, Object.assign({}, options, { frequency }));
+    return this.noteOn(m, velocity, time, Object.assign({}, options, { frequency }));
   }
 
-  noteOffHz(frequency) {
-    return this.noteOff(this.hzToMidi(frequency));
+  noteOffHz(frequency, time) {
+    return this.noteOff(this.hzToMidi(frequency), time);
   }
 
-  noteOff(midi) {
+  noteOff(midi, at) {
     const m = this._noteNumber(midi);
     if (this.sustain && this.active.has(m)) {
       this.sustained.add(m);          // pedal down: keep the note ringing
       return;
     }
-    this._release(m);
+    this._release(m, at);
   }
 
-  _release(midi) {
+  _release(midi, atTime) {
     const m = this._noteNumber(midi);
     const voice = this.active.get(m);
     if (!voice || voice.stopped || voice.ended) return;
-    voice.stopped = true;
     const now = this.ctx.currentTime;
-    const level = Math.max(this._gainAt(voice, now), 0.0001);
-    voice.gain.gain.cancelScheduledValues(now);
-    if (voice.gain.gain.value === 1) voice.gain.gain.setValueAtTime(0, now);
-    voice.gain.gain.linearRampToValueAtTime(level, now + ATTACK_SEC);
-    voice.gain.gain.setTargetAtTime(0.0001, now + ATTACK_SEC, RELEASE_SEC / 3);
+    const at = Number.isFinite(atTime) && atTime > now ? atTime : now;
+
+    // 重新排程时,先清掉此前为同一 voice 插入的 release 事件与定时器
+    if (voice.releaseAt !== null && voice.releaseAt !== at) {
+      voice.gain.gain.cancelScheduledValues(Math.min(at, voice.releaseAt));
+      this._clearReleaseSchedule(voice);
+    }
+    if (at > now) {
+      this._scheduleRelease(m, voice, at);
+      return;
+    }
+
+    this._clearReleaseSchedule(voice);
+    voice.stopped = true;
+    this._applyReleaseRamp(voice, now);
     this._finishVoice(m, voice);
   }
 
-  // 计算 noteOn() 之后 gain 包络在 t 时刻的值。attack 极短,直接按 peak 计。
+  _clearReleaseSchedule(voice) {
+    if (voice.releaseAt === null) return;
+    clearTimeout(voice.releaseTimer);
+    voice.releaseTimer = null;
+    voice.releaseAt = null;
+  }
+
+  // 在指定 ctx 时刻预排释放,避免释放时机依赖调用时的 currentTime
+  _scheduleRelease(m, voice, at) {
+    if (voice.releaseAt === at) return;
+    this._applyReleaseRamp(voice, at);
+    voice.releaseAt = at;
+    clearTimeout(voice.releaseTimer);
+    const finishDelay = Math.max(0, at + RELEASE_SEC - this.ctx.currentTime) * 1000;
+    voice.releaseTimer = setTimeout(() => {
+      voice.releaseTimer = null;
+      voice.releaseAt = null;
+      this._finishVoice(m, voice);
+    }, finishDelay);
+  }
+
+  // 从 at 时刻起平滑收向静音(立即释放时先钳掉取消 automation 后回落的默认值)
+  _applyReleaseRamp(voice, at) {
+    const level = Math.max(this._gainAt(voice, at), 0.0001);
+    const gain = voice.gain.gain;
+    gain.cancelScheduledValues(at);
+    if (at <= this.ctx.currentTime) {
+      if (gain.value === 1) gain.setValueAtTime(0, at);
+      gain.linearRampToValueAtTime(level, at + ATTACK_SEC);
+    } else {
+      gain.setValueAtTime(level, at);
+    }
+    gain.setTargetAtTime(0.0001, at + ATTACK_SEC, RELEASE_SEC / 3);
+  }
+
+  // gain 包络:t < startAt 视为 peak;此后自然衰减,预排了 release 则走释放段
   _gainAt(voice, t) {
     const startAt = voice.startAt;
     if (t < startAt) return voice.peak;
-    if (voice.duration === null) {
-      const decayStart = startAt + ATTACK_SEC;
-      if (t < decayStart) return voice.peak;
-      return voice.peak * Math.exp(-(t - decayStart) / (voice.decayTime / 2));
-    }
-    const releaseStart = startAt + voice.duration;
-    if (t < releaseStart) return voice.peak;
-    return 0.0001 + (voice.peak - 0.0001) * Math.exp(-(t - releaseStart) / (RELEASE_SEC / 3));
+    const decayStart = startAt + ATTACK_SEC;
+    const levelAt = (at) => at < decayStart
+      ? voice.peak
+      : voice.peak * Math.exp(-(at - decayStart) / (voice.decayTime / 2));
+    if (voice.releaseAt === null || t < voice.releaseAt) return levelAt(t);
+    const levelAtRelease = levelAt(voice.releaseAt);
+    return 0.0001 + (levelAtRelease - 0.0001) * Math.exp(-(t - voice.releaseAt) / (RELEASE_SEC / 3));
   }
 
   _finishVoice(m, voice) {

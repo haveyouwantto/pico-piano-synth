@@ -145,15 +145,14 @@ synth.noteOn(60, 0.8); // 弹一个音
 synth.noteOff(60);     // 松键
 ```
 
-* **`synth.noteOn(note, velocity?, options?)`**
-  演奏一个音符,返回 `note` 便于原样 `noteOff`。`note` 是 MIDI 音高(可用小数表示微分音),`velocity` 是力度 `0`–`1`。
-  * `options.when`:到这个时刻才开始(秒)
-  * `options.duration`:到时自动收尾,无需再调 `noteOff`
+* **`synth.noteOn(note, velocity?, time?, options?)`**
+  演奏一个音符,返回 `note` 便于原样 `noteOff`。`note` 是 MIDI 音高(可用小数表示微分音),`velocity` 是力度 `0`–`1`,`time` 是起音时刻(秒,缺省为当前时间)。
+  * `time`:到该 AudioContext 时刻才开始(排程用,不应传得过早)
   * `options.detune`:音分微调
   * `options.frequency`:直接指定频率(Hz)
   * `options.onEnded`:该音符结束时回调 `(note, velocity)`
-* **`synth.noteOff(note)` / `synth.allNotesOff()`** 停止指定音符 / 停止全部。
-* **`synth.noteOnHz(frequency, velocity?, options?)` / `synth.noteOffHz(frequency)`** 直接按频率演奏和收尾。
+* **`synth.noteOff(note, time?)` / `synth.allNotesOff()`** 在指定时刻(缺省为当前)停止音符 / 停止全部。排程播放就用 `noteOn(note, vel, time)` 起音、`noteOff(note, time)` 收尾。
+* **`synth.noteOnHz(frequency, velocity?, time?, options?)` / `synth.noteOffHz(frequency, time?)`** 直接按频率演奏和收尾。
 * **`synth.midiToHz(note)` / `synth.hzToMidi(frequency)`** 两种音高表示互转。
 
 > 微分音:`note` 写成小数即可,例如 `60.5` 是中央 C 上方 50 cents。
@@ -182,18 +181,14 @@ synth.output.connect(myMixer);
 
 ## 本地 Demo
 
-项目自带一个包含 88 键虚拟键盘、SMF/MIDI 文件播放、控制面板及 Web MIDI 接入能力的测试页面。
-选择 `.mid` 或 `.midi` 文件后即可播放，播放中的音符会在键盘上高亮。
+demo 页面提供 88 键键盘、SMF/MIDI 播放、WAV 离线导出与 Web MIDI 接入。
+`npm run dev` 把 demo 挂到 `http://localhost:3000/`,改动后浏览器自动刷新。
 
 ```bash
-# 启动本地服务
-npm run dev
-
+npm run dev -- --port 8080 --open   # 换端口 / 自动打开浏览器
+npm run dev -- --host 0.0.0.0       # 局域网设备访问(localhost/HTTPS 之外 Web Audio 不可用)
 ```
 
-打开浏览器访问 `http://localhost:3000/`。
-
-*(注：Web MIDI 硬件接入需要浏览器支持相应 API，且仅在安全上下文 HTTPS 或 localhost 下生效。Demo 的 SMF 播放支持常见的 Type 0/1 文件。)*
 
 ---
 
@@ -208,18 +203,3 @@ npm run dev
 [MIT License](LICENSE)
 
 ---
-
-## 本地调试:实时预览 Server
-
-开发调试时建议使用仓库自带的实时预览服务器(`npm run dev`)。它会:
-
-* 把 `demo/index.html` 挂到根路径 `/`,并让页面里引用的 `src/`、`model/` 等相对路径直接从仓库目录解析,打开 `http://localhost:3000/` 即可预览。
-* 监听 `src/`、`model/`、`demo/` 目录,改动后通过 SSE 通知浏览器自动刷新,无需手动构建。
-* 不依赖任何第三方包,也不需要先执行 `npm run build`(demo 直接加载未压缩的 `src/piano-synth.js`)。
-
-```bash
-# 指定端口或启动后自动打开浏览器
-npm run dev -- --port 8080 --open
-```
-
-如需在手机等其他设备上预览,可监听所有网卡 `npm run dev -- --host 0.0.0.0`,但 Web Audio / Web MIDI 仅在 localhost 或 HTTPS 下可用。

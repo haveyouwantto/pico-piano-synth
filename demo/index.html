@@ -751,12 +751,12 @@
         document.getElementById("k" + note)?.classList.add("playing");
       }
 
-      function releaseKey(note) {
+      function releaseKey(note, visualOnly = false) {
         const count = keyPresses.get(note) || 0;
         if (count <= 1) {
           keyPresses.delete(note);
           document.getElementById("k" + note)?.classList.remove("playing");
-          if (synth) synth.noteOff(note);
+          if (!visualOnly && synth) synth.noteOff(note);
         } else {
           keyPresses.set(note, count - 1);
         }
@@ -960,6 +960,10 @@
       }
 
       function stopSongPlayback(resetPosition = false) {
+        if (schedulePumpTimer !== null) {
+          clearInterval(schedulePumpTimer);
+          schedulePumpTimer = null;
+        }
         clearSongTimers();
         cancelAnimationFrame(songState.progressFrame);
         songState.playing = false;
@@ -972,51 +976,134 @@
         }
       }
 
-      function getSongStateAt(position) {
-        const active = new Map();
-        let sustain = false;
-        for (const event of song.events) {
-          if (event.time >= position) break;
-          const note = Math.max(21, Math.min(108, event.note));
-          if (event.command === 0x90 && event.value > 0) {
-            active.set(note, event.value / 127);
-          } else if (event.command === 0x80 || (event.command === 0x90 && event.value === 0)) {
-            active.delete(note);
-          } else if (event.command === 0xb0 && event.note === 64) {
-            sustain = event.value >= 64;
+      function getSongSegments() {
+        if (!song) return [];
+        if (!song.segments) song.segments = buildExportSegments(song);
+        return song.segments;
+      }
+
+      // 每次只预排未来一小段事件;延音音符记入等待集合,到踏板抬起才释放
+      const scheduleAhead = 0.25;
+      let schedulePumpTimer = null;
+      let scheduleEvCursor = 0;
+      let scheduleHeld = new Map();     // 当前在响的音符 note -> velocity
+      let scheduleWaiting = new Set();  // 已收到 NoteOff、正在等踏板抬起的音符
+      let schedulePedalDown = false;
+      let scheduleAnchorCtx = 0;
+      let scheduleAnchorPos = 0;
+
+      function songAbsTime(songTime) {
+        return scheduleAnchorCtx + (songTime - scheduleAnchorPos);
+      }
+
+      function scheduleRelease(note, at) {
+        if (!scheduleHeld.has(note)) return;
+        synth.noteOff(note, at);
+        scheduleHeld.delete(note);
+        scheduleWaiting.delete(note);
+        songTimers.push(setTimeout(() => {
+          if (songState.playing) releaseKey(note, true);
+        }, Math.max(0, at - synth.ctx.currentTime) * 1000));
+      }
+
+      function applyEvent(ev, at) {
+        const note = Math.max(21, Math.min(108, ev.note));
+        if (ev.command === 0x90 && ev.value > 0) {
+          if (scheduleHeld.has(note)) {
+            // 同键重触发:旧音(即使延音中)到此结束
+            scheduleRelease(note, at);
           }
+          const vel = Math.min(1, ev.value / 127);
+          synth.noteOn(note, vel, at);
+          scheduleHeld.set(note, vel);
+          songTimers.push(setTimeout(() => {
+            if (songState.playing) pressKey(note);
+          }, Math.max(0, at - synth.ctx.currentTime) * 1000));
+          return;
         }
-        return { active, sustain };
+        if (ev.command === 0x80 || (ev.command === 0x90 && ev.value === 0)) {
+          if (!scheduleHeld.has(note)) return;
+          if (schedulePedalDown) {
+            scheduleWaiting.add(note);  // 延音:等下一个踏板抬起再释放
+          } else {
+            scheduleRelease(note, at);
+          }
+          return;
+        }
+        if (ev.command === 0xb0 && ev.note === 64) {
+          if (ev.value >= 64) {
+            schedulePedalDown = true;
+            return;
+          }
+          schedulePedalDown = false;
+          for (const waitingNote of [...scheduleWaiting]) scheduleRelease(waitingNote, at);
+        }
+      }
+
+      // 重放 position 之前的事件来恢复播放状态(延音中的音符仍保留)
+      function restoreState(position) {
+        scheduleEvCursor = 0;
+        scheduleHeld.clear();
+        scheduleWaiting.clear();
+        schedulePedalDown = false;
+        const events = song.events;
+        while (scheduleEvCursor < events.length && events[scheduleEvCursor].time < position) {
+          const ev = events[scheduleEvCursor];
+          const note = Math.max(21, Math.min(108, ev.note));
+          if (ev.command === 0x90 && ev.value > 0) {
+            if (scheduleHeld.has(note)) {
+              scheduleHeld.delete(note);
+              scheduleWaiting.delete(note);
+            }
+            scheduleHeld.set(note, Math.min(1, ev.value / 127));
+          } else if (ev.command === 0x80 || (ev.command === 0x90 && ev.value === 0)) {
+            if (schedulePedalDown) scheduleWaiting.add(note);
+            else scheduleHeld.delete(note);
+          } else if (ev.command === 0xb0 && ev.note === 64) {
+            if (ev.value >= 64) {
+              schedulePedalDown = true;
+            } else {
+              schedulePedalDown = false;
+              for (const waitingNote of [...scheduleWaiting]) scheduleHeld.delete(waitingNote);
+              scheduleWaiting.clear();
+            }
+          }
+          scheduleEvCursor++;
+        }
+      }
+
+      function pumpSongSchedule() {
+        if (!songState.playing || !synth || !song) return;
+        const ctxNow = synth.ctx.currentTime;
+        const horizon = ctxNow + scheduleAhead;
+        const events = song.events;
+        while (scheduleEvCursor < events.length) {
+          const ev = events[scheduleEvCursor];
+          const at = songAbsTime(ev.time);
+          if (at >= horizon) break;
+          applyEvent(ev, Math.max(at, ctxNow));
+          scheduleEvCursor++;
+        }
+        if (scheduleEvCursor >= events.length) {
+          if (ctxNow >= songAbsTime(song.duration)) stopSongPlayback(true);
+        }
       }
 
       function scheduleSongFrom(position) {
+        if (schedulePumpTimer !== null) {
+          clearInterval(schedulePumpTimer);
+          schedulePumpTimer = null;
+        }
         clearSongTimers();
         stopAllNotes();
-        if (synth) synth.setSustain(false);
-        const state = getSongStateAt(position);
-        if (state.sustain && synth) synth.setSustain(true);
-        state.active.forEach((velocity, note) => {
-          synth.noteOn(note, velocity);
-          pressKey(note);
-        });
-
-        for (const event of song.events) {
-          if (event.time <= position) continue;
-          const timer = setTimeout(() => {
-            if (!songState.playing) return;
-            const note = Math.max(21, Math.min(108, event.note));
-            if (event.command === 0x90 && event.value > 0) {
-              synth.noteOn(note, event.value / 127);
-              pressKey(note);
-            } else if (event.command === 0x80 || (event.command === 0x90 && event.value === 0)) {
-              releaseKey(note);
-            } else if (event.command === 0xb0 && event.note === 64) {
-              synth.setSustain(event.value >= 64);
-            }
-          }, Math.max(0, event.time - position) * 1000);
-          songTimers.push(timer);
-        }
-        songTimers.push(setTimeout(() => stopSongPlayback(true), Math.max(0, song.duration - position + 0.1) * 1000));
+        if (!synth || !song) return;
+        synth.ensure();
+        synth.setSustain(false);
+        scheduleAnchorCtx = synth.ctx.currentTime;
+        scheduleAnchorPos = Math.max(0, position);
+        restoreState(scheduleAnchorPos);
+        pumpSongSchedule();
+        schedulePumpTimer = setInterval(pumpSongSchedule, 80);
       }
 
       function playSongFile() {
@@ -1183,7 +1270,7 @@
       async function exportSongToWav() {
         if (!song || !synth || exportingWav) return;
         if (songState.playing) stopSongPlayback(true);
-        const segments = buildExportSegments(song);
+        const segments = getSongSegments();
         if (!segments.length) {
           songStatus.textContent = "导出失败: 没有可渲染的音符";
           return;
@@ -1214,8 +1301,10 @@
           const registerUpTo = (to) => {
             while (cursor < segments.length && segments[cursor].start < to) {
               const seg = segments[cursor];
-              renderer.noteOn(seg.note, seg.vel, { when: seg.start, duration: seg.dur });
+              renderer.noteOn(seg.note, seg.vel, seg.start);
+              renderer.noteOff(seg.note, seg.start + seg.dur);
               cursor++;
+              console.log(cursor)
             }
           };
           for (let t = tick; t < total - 0.001; t += tick) offline.suspend(t);
