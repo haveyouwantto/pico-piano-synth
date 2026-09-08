@@ -383,6 +383,54 @@
       grid-column: 1 / -1;
     }
 
+    /* ---------- WAV 导出进度 ---------- */
+    #exportLine {
+      margin-top: 2px;
+    }
+    #exportLabel {
+      color: #9fb0c8;
+      font-size: 12px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    #exportProgress {
+      width: 100%;
+      height: 5px;
+      -webkit-appearance: none;
+      appearance: none;
+      background: rgba(255, 255, 255, 0.06);
+      border-radius: 4px;
+      outline: none;
+      cursor: progress;
+    }
+    #exportProgress::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 30% 30%, #8fd3ff, #2f9ee0);
+      box-shadow: 0 2px 8px rgba(47, 158, 224, 0.35);
+      border: 2px solid rgba(255, 255, 255, 0.15);
+      cursor: progress;
+    }
+    #exportProgress::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 30% 30%, #8fd3ff, #2f9ee0);
+      border: 2px solid rgba(255, 255, 255, 0.15);
+      cursor: progress;
+    }
+    #exportPercent {
+      color: #8fd3ff;
+      font-size: 12px;
+      min-width: 44px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
     /* ---------- 键盘容器 ---------- */
     #kb {
       position: relative;
@@ -612,6 +660,7 @@
         <input id="smfFile" type="file" accept=".mid,.midi,audio/midi,audio/x-midi">
         <button id="playSong" disabled>播放</button>
         <button id="stopSong" disabled>停止</button>
+        <button id="exportWav" disabled>导出 WAV</button>
       </div>
       <div id="midiControls">
         <label for="midiDevices">MIDI</label>
@@ -627,6 +676,11 @@
         <span id="songDuration">00:00</span>
       </div>
       <span id="songStatus">未加载 MIDI</span>
+      <div class="timeline" id="exportLine" style="display:none">
+        <span id="exportLabel">等待导出</span>
+        <input id="exportProgress" type="range" min="0" max="1000" step="1" value="0" disabled>
+        <span id="exportPercent">0%</span>
+      </div>
     </div>
     <div id="kb">
       <div id="keys"></div>
@@ -988,6 +1042,11 @@
           playSong.disabled = false;
           stopSong.disabled = false;
           songProgress.disabled = false;
+          document.getElementById("exportWav").disabled = false;
+          const exportLine = document.getElementById("exportLine");
+          exportLine.style.display = "none";
+          document.getElementById("exportProgress").value = 0;
+          document.getElementById("exportPercent").textContent = "0%";
           setSongPosition(0);
           playSong.textContent = "播放";
           songStatus.textContent = `${file.name} · ${parsed.trackCount} 轨 · ${parsed.tempoChanges} 个 tempo · ${formatTime(parsed.duration)}`;
@@ -996,6 +1055,8 @@
           playSong.disabled = true;
           stopSong.disabled = true;
           songProgress.disabled = true;
+          document.getElementById("exportWav").disabled = true;
+          document.getElementById("exportLine").style.display = "none";
           setSongPosition(0);
           songStatus.textContent = error.message;
         }
@@ -1015,6 +1076,179 @@
           setSongPosition(position);
         }
       });
+
+      // ========== WAV 离线导出 ==========
+      const exportWavBtn = document.getElementById("exportWav");
+      const exportLine = document.getElementById("exportLine");
+      const exportProgress = document.getElementById("exportProgress");
+      const exportPercent = document.getElementById("exportPercent");
+      const exportLabel = document.getElementById("exportLabel");
+      let exportingWav = false;
+
+      function setExportProgress(ratio, label) {
+        const clamped = Math.max(0, Math.min(1, ratio));
+        exportProgress.value = Math.round(clamped * 1000);
+        exportPercent.textContent = Math.round(clamped * 100) + "%";
+        if (label !== undefined) exportLabel.textContent = label;
+      }
+
+      // 把 SMF 事件解析成带起止时间的音符段(处理延音踏板)
+      function buildExportSegments(songData) {
+        const active = new Map();
+        const pedalHeld = new Map();
+        const segments = [];
+        const release = (entry, at) => {
+          if (!entry) return;
+          segments.push({
+            note: entry.note,
+            vel: entry.vel,
+            start: entry.start,
+            dur: Math.max(0.02, at - entry.start)
+          });
+        };
+        let pedal = false;
+        for (const ev of songData.events) {
+          if (ev.command === 0x90 && ev.value > 0) {
+            if (active.has(ev.note)) {
+              release(active.get(ev.note), ev.time);
+              active.delete(ev.note);
+            }
+            if (pedalHeld.has(ev.note)) {
+              release(pedalHeld.get(ev.note), ev.time);
+              pedalHeld.delete(ev.note);
+            }
+            active.set(ev.note, { note: ev.note, vel: Math.min(1, ev.value / 127), start: ev.time });
+          } else if (ev.command === 0x80 || (ev.command === 0x90 && ev.value === 0)) {
+            const entry = active.get(ev.note);
+            if (entry) {
+              active.delete(ev.note);
+              if (pedal) pedalHeld.set(ev.note, entry);
+              else release(entry, ev.time);
+            } else if (!pedal && pedalHeld.has(ev.note)) {
+              release(pedalHeld.get(ev.note), ev.time);
+              pedalHeld.delete(ev.note);
+            }
+          } else if (ev.command === 0xb0 && ev.note === 64) {
+            const down = ev.value >= 64;
+            if (pedal && !down) {
+              for (const entry of pedalHeld.values()) release(entry, ev.time);
+              pedalHeld.clear();
+            }
+            pedal = down;
+          }
+        }
+        // 曲末仍按住的音符统一松开,保证输出在有限时长内结束
+        const endTime = songData.duration;
+        for (const entry of [...active.values(), ...pedalHeld.values()]) release(entry, endTime);
+        segments.sort((a, b) => a.start - b.start);
+        return segments;
+      }
+
+      function encodeWavToBlob(buffer, sampleRate) {
+        const channelCount = buffer.numberOfChannels;
+        const channels = [];
+        for (let c = 0; c < channelCount; c++) channels.push(buffer.getChannelData(c));
+        const frameCount = buffer.length;
+        const blockAlign = channelCount * 2;
+        const dataSize = frameCount * blockAlign;
+        const out = new ArrayBuffer(44 + dataSize);
+        const view = new DataView(out);
+        const writeText = (offset, text) => {
+          for (let i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i));
+        };
+        writeText(0, "RIFF");
+        view.setUint32(4, 36 + dataSize, true);
+        writeText(8, "WAVE");
+        writeText(12, "fmt ");
+        view.setUint32(16, 16, true);
+        view.setUint16(20, 1, true);
+        view.setUint16(22, channelCount, true);
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, sampleRate * blockAlign, true);
+        view.setUint16(32, blockAlign, true);
+        view.setUint16(34, 16, true);
+        writeText(36, "data");
+        view.setUint32(40, dataSize, true);
+        let offset = 44;
+        for (let i = 0; i < frameCount; i++) {
+          for (let c = 0; c < channelCount; c++) {
+            const sample = Math.max(-1, Math.min(1, channels[c][i]));
+            view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+            offset += 2;
+          }
+        }
+        return new Blob([out], { type: "audio/wav" });
+      }
+
+      async function exportSongToWav() {
+        if (!song || !synth || exportingWav) return;
+        if (songState.playing) stopSongPlayback(true);
+        const segments = buildExportSegments(song);
+        if (!segments.length) {
+          songStatus.textContent = "导出失败: 没有可渲染的音符";
+          return;
+        }
+        const volumeEl = document.getElementById("vol");
+        exportingWav = true;
+        exportWavBtn.disabled = true;
+        exportLine.style.display = "grid";
+        setExportProgress(0, "准备渲染…");
+        try {
+          const sampleRate = 48000;
+          let maxEnd = 0;
+          for (const seg of segments) maxEnd = Math.max(maxEnd, seg.start + seg.dur);
+          const total = maxEnd + 2.5; // 尾部余响
+          if (total > 900) throw new Error("歌曲过长(超过 15 分钟),暂不支持导出");
+          const offline = new OfflineAudioContext(2, Math.ceil(total * sampleRate), sampleRate);
+          const renderer = new PianoSynth(synth.model, {
+            audioContext: offline,
+            autoResume: false
+          });
+          renderer.ensure();
+          renderer.setVolume(Number(volumeEl.value) || 0.8);
+
+          // 把渲染切成小段:每渲染一小段时间就暂停,用于更新进度条
+          const slices = Math.max(8, Math.min(240, Math.round(total / 0.25)));
+          const tick = total / slices;
+          let cursor = 0;
+          const registerUpTo = (to) => {
+            while (cursor < segments.length && segments[cursor].start < to) {
+              const seg = segments[cursor];
+              renderer.noteOn(seg.note, seg.vel, { when: seg.start, duration: seg.dur });
+              cursor++;
+            }
+          };
+          for (let t = tick; t < total - 0.001; t += tick) offline.suspend(t);
+          offline.onstatechange = () => {
+            if (offline.state !== "suspended") return;
+            const pos = offline.currentTime / total;
+            setExportProgress(pos, `渲染中 ${Math.floor(offline.currentTime)}s`);
+            registerUpTo(offline.currentTime + tick);
+            if (offline.currentTime < total - 0.01) offline.resume();
+          };
+          registerUpTo(tick);
+          const buffer = await offline.startRendering();
+
+          const blob = encodeWavToBlob(buffer, sampleRate);
+          const anchor = document.createElement("a");
+          anchor.href = URL.createObjectURL(blob);
+          anchor.download = (song.fileName || "piano").replace(/\.(mid|midi)$/i, "") + ".wav";
+          document.body.appendChild(anchor);
+          anchor.click();
+          anchor.remove();
+          setTimeout(() => URL.revokeObjectURL(anchor.href), 5000);
+          setExportProgress(1, `完成 · ${anchor.download}`);
+        } catch (error) {
+          console.error(error);
+          setExportProgress(0, "导出失败");
+          songStatus.textContent = "导出失败: " + error.message;
+        } finally {
+          exportingWav = false;
+          exportWavBtn.disabled = false;
+        }
+      }
+
+      exportWavBtn.addEventListener("click", exportSongToWav);
     </script>
   </main>
 </body>

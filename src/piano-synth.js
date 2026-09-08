@@ -14,6 +14,9 @@
  *   synth.noteOff(60);
  */
 
+const ATTACK_SEC = 0.002;
+const RELEASE_SEC = 0.3;
+
 class PianoSynth {
   constructor(model, options = {}) {
     this.model = model;
@@ -26,6 +29,7 @@ class PianoSynth {
     this.output = null;
     this.compressor = null;
     this._autoConnect = options.autoConnect !== false;
+    this._autoResume = options.autoResume !== false;
 
     this.dryGain = null;
     this.wetGain = null;
@@ -188,7 +192,7 @@ class PianoSynth {
       this._hammerNoiseBuffer = null;
       this._buildDefaultIR();
     }
-    if (this.ctx.state === "suspended") this.ctx.resume();
+    if (this._autoResume && this.ctx.state === "suspended") this.ctx.resume();
   }
 
   connect(destination) {
@@ -388,8 +392,8 @@ class PianoSynth {
     const filterStart = Math.min(cutoffFreq, nyquist);
     const filterTarget = Math.min(cutoffFreq * 0.1, nyquist);
     const filterDecay = decayTime / 3;
-    const attack = 0.002;
-    const rel = 0.3;
+    const attack = ATTACK_SEC;
+    const rel = RELEASE_SEC;
 
     const osc = this.ctx.createOscillator();
     osc.frequency.value = oscFreq;
@@ -457,6 +461,8 @@ class PianoSynth {
       velocity: vel,
       startAt,
       decayTime,
+      peak,
+      duration,
       stopped: false,
       ended: false,
       onEnded: typeof options.onEnded === "function" ? options.onEnded : null
@@ -490,12 +496,26 @@ class PianoSynth {
     if (!voice || voice.stopped || voice.ended) return;
     voice.stopped = true;
     const now = this.ctx.currentTime;
-    const rel = 0.3;                    // 固定 0.3 s release
-    if (now < voice.startAt) {
-      voice.gain.gain.cancelScheduledValues(now);
-    }
-    voice.gain.gain.setTargetAtTime(0.0001, Math.max(now, voice.startAt), rel / 3);
+    const level = Math.max(this._gainAt(voice, now), 0.0001);
+    voice.gain.gain.cancelScheduledValues(now);
+    if (voice.gain.gain.value === 1) voice.gain.gain.setValueAtTime(0, now);
+    voice.gain.gain.linearRampToValueAtTime(level, now + ATTACK_SEC);
+    voice.gain.gain.setTargetAtTime(0.0001, now + ATTACK_SEC, RELEASE_SEC / 3);
     this._finishVoice(m, voice);
+  }
+
+  // 计算 noteOn() 之后 gain 包络在 t 时刻的值。attack 极短,直接按 peak 计。
+  _gainAt(voice, t) {
+    const startAt = voice.startAt;
+    if (t < startAt) return voice.peak;
+    if (voice.duration === null) {
+      const decayStart = startAt + ATTACK_SEC;
+      if (t < decayStart) return voice.peak;
+      return voice.peak * Math.exp(-(t - decayStart) / (voice.decayTime / 2));
+    }
+    const releaseStart = startAt + voice.duration;
+    if (t < releaseStart) return voice.peak;
+    return 0.0001 + (voice.peak - 0.0001) * Math.exp(-(t - releaseStart) / (RELEASE_SEC / 3));
   }
 
   _finishVoice(m, voice) {

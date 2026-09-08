@@ -88,7 +88,7 @@ npm install pico-piano-synth
 ### 方式一：使用内嵌模型单文件（推荐）
 
 ```html
-<script src="https://unpkg.com/pico-piano-synth@0.3.0/dist/piano-synth-embedded.min.js"></script>
+<script src="https://unpkg.com/pico-piano-synth@0.3.1/dist/piano-synth-embedded.min.js"></script>
 
 <button id="play">播放</button>
 
@@ -115,11 +115,11 @@ document.getElementById("play").addEventListener("click", async () => {
 ### 方式二：分离式加载模型
 
 ```html
-<script src="https://unpkg.com/pico-piano-synth@0.3.0/dist/piano-synth.min.js"></script>
+<script src="https://unpkg.com/pico-piano-synth@0.3.1/dist/piano-synth.min.js"></script>
 
 <script>
 // 手动指定二进制模型文件 (.bin) 路径
-const synth = await PianoSynth.load("https://unpkg.com/pico-piano-synth@0.3.0/dist/piano_nn.bin");
+const synth = await PianoSynth.load("https://unpkg.com/pico-piano-synth@0.3.1/dist/piano_nn.bin");
 </script>
 
 ```
@@ -132,7 +132,7 @@ const synth = await PianoSynth.load("https://unpkg.com/pico-piano-synth@0.3.0/di
 
 * **`PianoSynth.load(url?, options?)`**
   加载模型并创建合成器。不传 `url` 使用内置模型;传 `url` 从该地址加载。
-  需要自己管理音频输出时,`options` 里传 `audioContext`,并把 `autoConnect` 设为 `false`。
+  需要自己管理音频输出时,`options` 里传 `audioContext`,并把 `autoConnect` 设为 `false`;用 `OfflineAudioContext` 离线渲染时,再把 `autoResume` 设为 `false`。
 * **`PianoSynth.fromBinary(buffer)`**
   从模型二进制数据(`ArrayBuffer` / `Uint8Array`)创建合成器。
 
