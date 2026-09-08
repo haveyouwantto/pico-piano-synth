@@ -25,7 +25,7 @@ class PianoSynth {
     this.dryGain = null;
     this.wetGain = null;
     this.convolver = null;
-    this._reverbWet = 0.8;   
+    this._reverbWet = 0.8;
 
     this._hammerNoiseBuffer = null;
 
@@ -216,7 +216,7 @@ class PianoSynth {
   // Mulberry32 确定性伪随机数生成器 (返回 0 到 1 之间的浮点数)
   _createPrng(seed = 123456789) {
     let s = seed >>> 0;
-    return function() {
+    return function () {
       s = (s + 0x6D2B79F5) | 0;
       let t = Math.imul(s ^ (s >>> 15), s | 1);
       t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
@@ -286,26 +286,19 @@ class PianoSynth {
 
   noteOn(midi, velocity = 1) {
     this.ensure();
-    const m = Math.max(21, Math.min(108, midi));
+    const m = Math.max(0, Math.min(127, midi));
     this.sustained.delete(m);
     if (this.active.has(m)) this._release(m);
     const now = this.ctx.currentTime + 0.05;  // slight delay to avoid clicks
     const freq = this._midiHz(m);
-    // 高频音量衰减
-    const pitchAtten = Math.pow(2, (60 - m) / 48);
-    // 限制最低衰减，避免最低音过大
-    const atten = Math.max(0.35, Math.min(1.6, pitchAtten));
-    const peak = (velocity ** 2) * 0.5 * atten;   // 主音色峰值
+    const peak = (velocity ** 2) * 0.5 ;   // 主音色峰值
 
     // user envelope formulas
     const decayTime = Math.max(this.decay * 1.7 * Math.pow(2, (60 - m) / 18), 0.5);
     const cutoffFreq = 492.35 * Math.exp(2.5 * velocity);
     const nyquist = this.ctx.sampleRate / 2;
-    const pitchComp = Math.pow(2, Math.max(-0.8, (60 - m) / 48));
-    const filterStart = Math.min(
-      Math.max(freq * 4 * pitchComp, cutoffFreq), nyquist);
-    const filterTarget = Math.min(
-      Math.max(freq * 1.2, cutoffFreq * 0.1), nyquist);
+    const filterStart = Math.min(cutoffFreq, nyquist);
+    const filterTarget = Math.min(cutoffFreq * 0.1, nyquist);
     const filterDecay = decayTime / 3;
     const attack = 0.002;
 
@@ -346,7 +339,7 @@ class PianoSynth {
 
     const noiseGain = this.ctx.createGain();
     // 力度用二次曲线，更接近真实击弦动态
-    const hammerLevel = Math.pow(velocity, 1.65) * 3;
+    const hammerLevel = Math.pow(velocity, 2) * 3;
 
     // 极快的起音 + 快速衰减（15~40ms）
     const hammerDur = 0.016 + velocity * 0.028;
@@ -366,7 +359,7 @@ class PianoSynth {
   }
 
   noteOff(midi) {
-    const m = Math.max(21, Math.min(108, midi));
+    const m = Math.max(0, Math.min(127, midi));
     if (this.sustain && this.active.has(m)) {
       this.sustained.add(m);          // pedal down: keep the note ringing
       return;
@@ -375,7 +368,7 @@ class PianoSynth {
   }
 
   _release(midi) {
-    const m = Math.max(21, Math.min(108, midi));
+    const m = Math.max(0, Math.min(127, midi));
     const a = this.active.get(m);
     if (!a || a.stopped) return;
     a.stopped = true;

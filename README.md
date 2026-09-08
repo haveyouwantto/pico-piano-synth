@@ -170,7 +170,7 @@ const synth = await PianoSynth.load("https://unpkg.com/pico-piano-synth@0.2.2/di
 
 ```bash
 # 启动本地服务
-npx serve .
+npm run dev
 
 ```
 
@@ -189,3 +189,20 @@ npx serve .
 ## 开源协议
 
 [MIT License](LICENSE)
+
+---
+
+## 本地调试:实时预览 Server
+
+开发调试时建议使用仓库自带的实时预览服务器(`npm run dev`)。它会:
+
+* 把 `demo/index.html` 挂到根路径 `/`,并让页面里引用的 `src/`、`model/` 等相对路径直接从仓库目录解析,打开 `http://localhost:3000/` 即可预览。
+* 监听 `src/`、`model/`、`demo/` 目录,改动后通过 SSE 通知浏览器自动刷新,无需手动构建。
+* 不依赖任何第三方包,也不需要先执行 `npm run build`(demo 直接加载未压缩的 `src/piano-synth.js`)。
+
+```bash
+# 指定端口或启动后自动打开浏览器
+npm run dev -- --port 8080 --open
+```
+
+如需在手机等其他设备上预览,可监听所有网卡 `npm run dev -- --host 0.0.0.0`,但 Web Audio / Web MIDI 仅在 localhost 或 HTTPS 下可用。
