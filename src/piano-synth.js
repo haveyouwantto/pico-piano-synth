@@ -427,7 +427,7 @@ class PianoSynth {
     const nyquist = this.ctx.sampleRate / 2;
     const filterStart = Math.min(cutoffFreq, nyquist);
     const filterTarget = Math.min(cutoffFreq * 0.1, nyquist);
-    const filterDecay = decayTime / 3;
+    const filterDecay = decayTime * 0.5;
     const attack = ATTACK_SEC;
 
     const source = this.ctx.createOscillator();
