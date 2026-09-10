@@ -67,6 +67,8 @@ class PianoSynth {
       // ---- 击弦噪声 ----
       hammerNoise: true,       // 是否叠加击弦噪声
       hammerGain: 0.5,           // 噪声峰值 = vel^velocityCurve * 该系数
+      hammerCurveExp: 0.3,      // 噪声频率随力度的指数曲线
+      hammerCurveFloor: 0.2,    // 噪声频率随力度的指数曲线下限
       hammerCutoffOffset: 200, // 噪声低通 = 基频 + 该值
       hammerAttack: 0.0012,    // 噪声起音(秒)
       hammerDur: 0.016,        // 噪声时长 = hammerDur + vel * hammerDurVelocity
@@ -591,7 +593,7 @@ class PianoSynth {
 
       const noiseFilter = this.ctx.createBiquadFilter();
       // 低音更闷一点，高音更亮
-      noiseFilter.frequency.value = baseHz + S.hammerCutoffOffset;
+      noiseFilter.frequency.value = baseHz * Math.max(S.hammerCurveFloor, vel ** S.hammerCurveExp) + S.hammerCutoffOffset;
 
       const noiseGain = this.ctx.createGain();
       // 力度用曲线控制，更接近真实击弦动态
