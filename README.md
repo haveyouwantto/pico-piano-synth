@@ -1,6 +1,6 @@
 # pico-piano-synth
 
-基于神经网络模型生成音色的轻量化 Web Audio 钢琴合成器。打包体积约 **11 KB**，核心音色由约 **0.9 KB** 的小型神经网络生成，**无需任何音频采样切片（Samples）**。
+基于神经网络模型生成音色的轻量化 Web Audio 钢琴合成器。打包体积约 **15 KB**（gzip 约 6 KB），核心音色由约 **0.9 KB** 的小型神经网络生成，**无需任何音频采样切片（Samples）**。
 
 适合用于体积敏感的 Web 音频项目、交互式网页、虚拟键盘及 MIDI 接口对接。
 
@@ -10,11 +10,12 @@
 
 ## 特性
 
-* **极小体积**：压缩后全量代码约 11 KB（含 0.9 KB 内嵌神经网络模型）。
+* **极小体积**：minify 后全量代码约 15 KB（含 0.9 KB 内嵌神经网络模型），gzip 后约 6 KB。
 * **逼真音色**：通过神经网络预测钢琴谐波结构，结合动态包络、击弦噪声和混响，获得自然的钢琴音色。
 * **纯算法合成**：无外部音频文件依赖，直接根据 MIDI 音高实时计算波形。
 * **完整音域支持**：覆盖 88 键标准钢琴（MIDI 21–108）。
 * **表达力控制**：支持动态按键力度（Velocity）、延音踏板（Sustain Pedal）、主音量控制及混响调节。
+* **参数全可调**：包络、衰减、滤波、击弦噪声、混响、压缩器等 48 个参数集中在 `synth.settings`，构造时可覆盖、运行时可通过 `setSettings()` 增量修改。
 * **单文件即插即用**：提供内嵌模型的打包版本，开箱即用。
 * **零外部依赖**：原生基于浏览器 Web Audio API 开发。
 
@@ -88,7 +89,7 @@ npm install pico-piano-synth
 ### 方式一：使用内嵌模型单文件（推荐）
 
 ```html
-<script src="https://unpkg.com/pico-piano-synth@0.3.1/dist/piano-synth-embedded.min.js"></script>
+<script src="https://unpkg.com/pico-piano-synth@0.4.0/dist/piano-synth-embedded.min.js"></script>
 
 <button id="play">播放</button>
 
@@ -115,11 +116,11 @@ document.getElementById("play").addEventListener("click", async () => {
 ### 方式二：分离式加载模型
 
 ```html
-<script src="https://unpkg.com/pico-piano-synth@0.3.1/dist/piano-synth.min.js"></script>
+<script src="https://unpkg.com/pico-piano-synth@0.4.0/dist/piano-synth.min.js"></script>
 
 <script>
 // 手动指定二进制模型文件 (.bin) 路径
-const synth = await PianoSynth.load("https://unpkg.com/pico-piano-synth@0.3.1/dist/piano_nn.bin");
+const synth = await PianoSynth.load("https://unpkg.com/pico-piano-synth@0.4.0/dist/piano_nn.bin");
 </script>
 
 ```
@@ -163,6 +164,33 @@ synth.noteOff(60);     // 松键
 * **`synth.setReverb(amount)` / `synth.loadIR(url)`** 混响强弱 / 换成自定义脉冲响应。
 * **`synth.onNoteEnded = (note, velocity) => {}`** 监听任意音符结束。
 * **`synth.metrics`** 只读观测快照:当前 `time`、`polyphony`(仍在播放的 voice 数,含释放尾音)、`sustained`、`waveCache`/`envCache` 缓存大小、音量与混响值等。
+
+### 参数设置(synth.settings)
+
+合成器的全部可调参数都放在实例的 **`synth.settings`** 里,覆盖音量包络、衰减曲线、低通扫频、谐波上限、击弦噪声、默认混响 IR、压缩器等。
+
+```js
+// 构造时覆盖(只写要改的键)
+const synth = await PianoSynth.load(url, { settings: { reverb: 0.25, decay: 1.2 } });
+
+// 运行时增量修改:未列出的键保持不变,返回完整的 settings
+synth.setSettings({ attack: 0.004, hammerNoise: false });
+synth.settings.attack;   // 读取当前值
+synth.decay = 1.5;       // 快捷方式,等价于 setSettings({ decay: 1.5 })
+```
+
+`volume`、`reverb` 与压缩器参数会立即作用到音频图,其余参数在下一次 `noteOn()` 生效。修改 `a4` / `partialMaxHz` / `partialMargin` / `silentDb` 会清空波表缓存,修改 `noise*` 会重建噪声 buffer,修改 `ir*` 会重建默认 IR(`loadIR()` 载入的自定义 IR 不会被覆盖)。
+
+| 分组 | 键(默认值) |
+| --- | --- |
+| 输出 | `volume` 0.8、`reverb` 0.8、`a4` 440、`waveCacheMax` 128 |
+| 音量包络 | `attack` 0.001、`release` 0.3、`tcRatio` 3、`releaseTail` 0.15、`startDelay` 0.05、`minStopLead` 0.02、`velocityCurve` 2、`velocityGain` 0.5 |
+| 衰减 | `decay` 1.0、`decayScale` 1.7、`decayRefNote` 60、`decayPitchDiv` 18、`decayMin` 0.5、`decayTc` 0.5、`decayTail` 4、`decayTailMin` 3.0 |
+| 低通扫频 | `filterBaseHz` 492.35、`filterVelocityExp` 2.5、`filterTargetRatio` 0.1、`filterDecayRatio` 0.5、`filterQ` -1 |
+| 谐波 | `partialMaxHz` 12000、`partialMargin` 0.98、`silentDb` -200 |
+| 击弦噪声 | `hammerNoise` true、`hammerGain` 3、`hammerCutoffOffset` 1000、`hammerAttack` 0.0012、`hammerDur` 0.016、`hammerDurVelocity` 0.028、`hammerStopTail` 0.02、`noiseDuration` 0.08、`noisePink` 0.02、`noiseSeed` 42、`silenceFloor` 0.0001 |
+| 默认混响 IR | `irDuration` 1.6、`irDecay` 50、`irDamping` 0.22、`irSeed` 411 |
+| 压缩器 | `compressorThreshold` -24、`compressorKnee` 30、`compressorRatio` 12、`compressorAttack` 0.003、`compressorRelease` 0.25 |
 
 ### 接入自己的音频链路
 

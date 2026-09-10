@@ -4,8 +4,12 @@
  * Model: PIANO_NN v2 (midi + low/high bank -> 32 partial intensities at x*f0),
  * 8-bit quantised. The two banks cover up to 64 partials in total.
  * Envelope: decayTime + lowpass sweep (user formula):
- *   decayTime  = max(decay * 1.7 * 2^((60-pitch)/18), 0.5)
+ *   decayTime  = max(decay * decayScale * 2^((decayRefNote-pitch)/decayPitchDiv), decayMin)
  *   filterStart/Target/Decay as in the pluck model, gain = setTargetAtTime.
+ *
+ * 所有可调参数定义在构造函数里的 this.settings:
+ * 构造时用 new PianoSynth(model, { settings: { reverb: 0.3 } }) 覆盖,
+ * 运行时用 synth.setSettings(patch) 增量修改(音量/混响/压缩器立即生效)。
  *
  * Usage:
  *   const synth = new PianoSynth(PIANO_NN, { audioContext });
@@ -14,14 +18,78 @@
  *   synth.noteOff(60);
  */
 
-const ATTACK_SEC = 0.001;
-const RELEASE_SEC = 0.3;
-const WAVE_CACHE_MAX = 128;
-
 class PianoSynth {
   constructor(model, options = {}) {
     this.model = model;
     this.layers = null;
+
+    // 合成器的全部可调参数
+    this.settings = {
+      // ---- 输出 ----
+      volume: 0.8,             // 主音量(setVolume 可实时改)
+      reverb: 0.8,             // 混响湿度 0~1(setReverb 可实时改)
+      a4: 440,                 // A4 参考频率 Hz
+      waveCacheMax: 128,       // PeriodicWave 缓存条数上限
+
+      // ---- 音量包络 ----
+      attack: 0.001,           // 起音时间常数(秒)
+      release: 0.3,            // 释音时间常数(秒)
+      tcRatio: 3,              // setTargetAtTime 时间常数 = 设定时间 / 该值
+      releaseTail: 0.15,       // 释音排程后多留的尾音(秒)
+      startDelay: 0.05,        // 未指定 time 时往后延迟起音(秒),避免爆音
+      minStopLead: 0.02,       // source 至少排到起音后这么久才停
+      velocityCurve: 2,        // 力度 -> 峰值 的指数
+      velocityGain: 0.5,       // 力度 -> 峰值 的系数
+
+      // ---- 衰减(音高越低衰减越慢) ----
+      decay: 1.0,              // 全局衰减倍数
+      decayScale: 1.7,
+      decayRefNote: 60,        // 以该音高为 1x 基准
+      decayPitchDiv: 18,       // 音高偏移除数
+      decayMin: 0.5,           // 衰减时间下限(秒)
+      decayTc: 0.5,            // 指数衰减时间常数 = decayTime * 该系数
+      decayTail: 4,            // 自然结束后停 source: decayTime * 该系数
+      decayTailMin: 3.0,       // 上一项与至少这么多秒取大
+
+      // ---- 低通扫频 ----
+      filterBaseHz: 492.35,
+      filterVelocityExp: 2.5,
+      filterTargetRatio: 0.1,  // 终止频率 = 起始频率 * 该系数
+      filterDecayRatio: 0.5,   // 扫频时间常数 = decayTime * 该系数
+      filterQ: -1,             // Q < 0 表示无共振
+
+      // ---- 谐波 ----
+      partialMaxHz: 12000,     // 只保留低于该频率的谐波(抗混叠)
+      partialMargin: 0.98,     // 再乘该系数留裕量
+      silentDb: -200,          // 缺失谐波的 dB 下限
+
+      // ---- 击弦噪声 ----
+      hammerNoise: true,       // 是否叠加击弦噪声
+      hammerGain: 3,           // 噪声峰值 = vel^velocityCurve * 该系数
+      hammerCutoffOffset: 1000, // 噪声低通 = 基频 + 该值
+      hammerAttack: 0.0012,    // 噪声起音(秒)
+      hammerDur: 0.016,        // 噪声时长 = hammerDur + vel * hammerDurVelocity
+      hammerDurVelocity: 0.028,
+      hammerStopTail: 0.02,    // 噪声 source 停止的额外余量(秒)
+      noiseDuration: 0.08,     // 噪声 buffer 长度(秒)
+      noisePink: 0.02,         // 粉红噪声倾向系数
+      noiseSeed: 42,           // 噪声 buffer 随机种子(固定值保证可复现)
+      silenceFloor: 0.0001,    // 指数斜坡与静音下限
+
+      // ---- 默认混响 IR ----
+      irDuration: 1.6,         // 长度(秒)
+      irDecay: 50,             // 衰减速度
+      irDamping: 0.22,         // 高频吸收(一阶低通系数)
+      irSeed: 411,             // 随机种子
+
+      // ---- 压缩器 ----
+      compressorThreshold: -24,
+      compressorKnee: 30,
+      compressorRatio: 12,
+      compressorAttack: 0.003,
+      compressorRelease: 0.25
+    };
+    if (options.settings) Object.assign(this.settings, options.settings);
 
     this.ctx = options.audioContext || null;
     this._ownsContext = !this.ctx;
@@ -35,7 +103,7 @@ class PianoSynth {
     this.dryGain = null;
     this.wetGain = null;
     this.convolver = null;
-    this._reverbWet = 0.8;
+    this._customIR = false;
 
     this._hammerNoiseBuffer = null;
 
@@ -45,10 +113,56 @@ class PianoSynth {
     this.playing = new Set();
     this.sustain = false;
     this.sustained = new Set();
-    this.decay = 1.0;
-    this._vol = 0.8;
     this.onNoteEnded = null;
     this._decodeModel();
+  }
+
+  // synth.decay 是 settings.decay 的快捷方式,赋值即改设置
+  get decay() {
+    return this.settings.decay;
+  }
+
+  set decay(value) {
+    this.setSettings({ decay: value });
+  }
+
+  // 增量修改设置:未列出的键保持不变,返回完整的 settings
+  setSettings(patch) {
+    if (!patch) return this.settings;
+    const touched = [];
+    for (const key of Object.keys(patch)) {
+      if (!Object.prototype.hasOwnProperty.call(this.settings, key)) continue;
+      this.settings[key] = patch[key];
+      touched.push(key);
+    }
+    this._applySettings(touched);
+    return this.settings;
+  }
+
+  // 把 settings 应用到当前音频图;touched 里的键顺带失效受影响的缓存
+  _applySettings(touched) {
+    const S = this.settings;
+    if (this.master) this.master.gain.value = S.volume;
+    this._applyReverbMix();
+    const comp = this.compressor;
+    if (comp) {
+      comp.threshold.value = S.compressorThreshold;
+      comp.knee.value = S.compressorKnee;
+      comp.ratio.value = S.compressorRatio;
+      comp.attack.value = S.compressorAttack;
+      comp.release.value = S.compressorRelease;
+    }
+    if (!touched) return;
+    for (const key of touched) {
+      if (key === "a4" || key === "partialMaxHz" || key === "partialMargin" || key === "silentDb") {
+        this.waveCache.clear();       // 谐波表变了,缓存的 PeriodicWave 失效
+      } else if (key === "noiseSeed" || key === "noisePink" || key === "noiseDuration") {
+        this._hammerNoiseBuffer = null;
+      } else if (!this._customIR &&
+        (key === "irSeed" || key === "irDecay" || key === "irDuration" || key === "irDamping")) {
+        this._buildDefaultIR();       // 自定义 IR 优先,不覆盖
+      }
+    }
   }
 
   static _parseBinary(buf) {
@@ -135,7 +249,7 @@ class PianoSynth {
   }
 
   _midiHz(m) {
-    return 440 * Math.pow(2, (m - 69) / 12);
+    return this.settings.a4 * Math.pow(2, (m - 69) / 12);
   }
 
   _noteNumber(value) {
@@ -154,7 +268,7 @@ class PianoSynth {
     if (!Number.isFinite(frequency) || frequency <= 0) {
       throw new TypeError("frequency must be a positive finite number, got: " + frequency);
     }
-    return 69 + 12 * Math.log2(frequency / 440);
+    return 69 + 12 * Math.log2(frequency / this.settings.a4);
   }
 
   ensure() {
@@ -174,7 +288,6 @@ class PianoSynth {
 
     if (!this.master) {
       this.master = this.ctx.createGain();
-      this.master.gain.value = this._vol;
 
       this.compressor = this.ctx.createDynamicsCompressor();
       this.output = this.ctx.createGain();
@@ -186,7 +299,7 @@ class PianoSynth {
       this.wetGain = this.ctx.createGain();
       this.convolver = this.ctx.createConvolver();
 
-      this.setReverb(this._reverbWet);
+      this._applySettings();   // 主音量 / 混响配比 / 压缩器参数
 
       this.dryGain.connect(this.master);
       this.convolver.connect(this.wetGain);
@@ -245,9 +358,10 @@ class PianoSynth {
   }
 
   // 未加载外部 IR 时也能保留房间混响
-  _buildDefaultIR(durationSeconds = 1.6, decay = 50.0) {
-    if (!this.ctx) return;
-    const rand = this._createPrng(411); // 固定种子,每次结果一致
+  _buildDefaultIR(durationSeconds = this.settings.irDuration, decay = this.settings.irDecay) {
+    if (!this.ctx || !this.convolver) return;
+    // 固定种子,每次结果一致
+    const rand = this._createPrng(this.settings.irSeed);
     const sampleRate = this.ctx.sampleRate;
     const length = Math.floor(sampleRate * durationSeconds);
     const buffer = this.ctx.createBuffer(2, length, sampleRate);
@@ -262,11 +376,12 @@ class PianoSynth {
     }
 
     // 模拟木质琴箱的高频吸收
+    const damping = this.settings.irDamping;
     for (let c = 0; c < 2; c++) {
       const channel = buffer.getChannelData(c);
       let last = 0;
       for (let i = 0; i < length; i++) {
-        channel[i] = last + 0.22 * (channel[i] - last);
+        channel[i] = last + damping * (channel[i] - last);
         last = channel[i];
       }
     }
@@ -277,18 +392,20 @@ class PianoSynth {
   _getHammerNoiseBuffer() {
     if (this._hammerNoiseBuffer) return this._hammerNoiseBuffer;
 
-    const rand = this._createPrng(42);  // 固定种子,每次结果一致
-    const duration = 0.08;          // 足够长，后面用 gain 截断
+    const S = this.settings;
+    const rand = this._createPrng(S.noiseSeed);  // 固定种子,每次结果一致
+    const duration = S.noiseDuration;            // 足够长，后面用 gain 截断
     const sampleRate = this.ctx.sampleRate;
     const length = Math.floor(sampleRate * duration);
     const buffer = this.ctx.createBuffer(1, length, sampleRate);
     const data = buffer.getChannelData(0);
 
     // 白噪声 + 轻微粉红噪声倾向（更接近真实击弦）
+    const pink = S.noisePink;
     let last = 0;
     for (let i = 0; i < length; i++) {
       const white = rand() * 2 - 1;
-      data[i] = (last + 0.02 * white) / 1.02;
+      data[i] = (last + pink * white) / (1 + pink);
       last = data[i];
     }
     this._hammerNoiseBuffer = buffer;
@@ -300,6 +417,7 @@ class PianoSynth {
     const res = await fetch(url);
     const arrayBuffer = await res.arrayBuffer();
     this.convolver.buffer = await this.ctx.decodeAudioData(arrayBuffer);
+    this._customIR = true;   // 自定义 IR 优先,ir* 设置不再覆盖
   }
 
   _createPrng(seed = 123456789) {
@@ -313,15 +431,20 @@ class PianoSynth {
   }
 
   setReverb(wetRatio) {
-    this._reverbWet = Math.max(0, Math.min(1, wetRatio));
-    if (this.dryGain && this.wetGain) {
-      this.dryGain.gain.value = Math.cos(this._reverbWet * Math.PI * 0.5);
-      this.wetGain.gain.value = Math.sin(this._reverbWet * Math.PI * 0.5);
-    }
+    this.settings.reverb = Math.max(0, Math.min(1, wetRatio));
+    this._applyReverbMix();
+  }
+
+  // 等功率交叉淡入淡出:干湿比按 sin/cos 分配
+  _applyReverbMix() {
+    const wet = this.settings.reverb;
+    if (!this.dryGain || !this.wetGain) return;
+    this.dryGain.gain.value = Math.cos(wet * Math.PI * 0.5);
+    this.wetGain.gain.value = Math.sin(wet * Math.PI * 0.5);
   }
 
   setVolume(v) {
-    this._vol = v;
+    this.settings.volume = v;
     if (this.master) this.master.gain.value = v;
   }
 
@@ -341,8 +464,8 @@ class PianoSynth {
       scheduledReleases,
       waveCache: this.waveCache.size,
       envCache: this.envCache.size,
-      volume: this._vol,
-      reverb: this._reverbWet
+      volume: this.settings.volume,
+      reverb: this.settings.reverb
     };
   }
 
@@ -369,8 +492,9 @@ class PianoSynth {
   }
 
   _maxPartial(m) {
+    const S = this.settings;
     return Math.max(1, Math.min(this.model.n_partials,
-      Math.floor(0.98 * 12000 / this._midiHz(m))));
+      Math.floor(S.partialMargin * S.partialMaxHz / this._midiHz(m))));
   }
 
   _buildWave(m) {
@@ -388,14 +512,14 @@ class PianoSynth {
       const bank = Math.floor((h - 1) / bankSize);
       if (!banks.has(bank)) banks.set(bank, this._forward(m, bank));
       const env = banks.get(bank);
-      const db = (h - 1) % bankSize < env.length ? env[(h - 1) % bankSize] : -200;
+      const db = (h - 1) % bankSize < env.length ? env[(h - 1) % bankSize] : this.settings.silentDb;
       imag[h] = Math.pow(10, db / 20);
     }
 
     const real = new Float32Array(N + 1);
     const wave = this.ctx.createPeriodicWave(real, imag);
     this.waveCache.set(m, wave);
-    if (this.waveCache.size > WAVE_CACHE_MAX) {
+    if (this.waveCache.size > this.settings.waveCacheMax) {
       this.waveCache.delete(this.waveCache.keys().next().value);
     }
     return wave;
@@ -403,6 +527,7 @@ class PianoSynth {
 
   noteOn(midi, velocity = 1, time, options = {}) {
     this.ensure();
+    const S = this.settings;
     const m = this._noteNumber(midi);
     const vel = Number.isFinite(velocity) ? Math.max(0, Math.min(1, velocity)) : 1;
     this.sustained.delete(m);
@@ -414,21 +539,24 @@ class PianoSynth {
 
     const ctxNow = this.ctx.currentTime;
     const startAt = Number.isFinite(time) && time >= ctxNow
-      ? time : ctxNow + 0.05;   // 未指定 time 时稍延迟起音,避免爆音
+      ? time : ctxNow + S.startDelay;   // 未指定 time 时稍延迟起音,避免爆音
     const detune = Number.isFinite(options.detune) ? options.detune : 0;
     const noteHz = this._midiHz(m);
     const baseHz = Number.isFinite(options.frequency) && options.frequency > 0
       ? options.frequency : noteHz;
     const oscFreq = baseHz * Math.pow(2, detune / 1200);
-    const peak = (vel ** 2) * 0.5;
+    const peak = Math.pow(vel, S.velocityCurve) * S.velocityGain;
 
-    const decayTime = Math.max(this.decay * 1.7 * Math.pow(2, (60 - m) / 18), 0.5);
-    const cutoffFreq = 492.35 * Math.exp(2.5 * vel);
+    const decayTime = Math.max(
+      S.decay * S.decayScale * Math.pow(2, (S.decayRefNote - m) / S.decayPitchDiv),
+      S.decayMin
+    );
+    const cutoffFreq = S.filterBaseHz * Math.exp(S.filterVelocityExp * vel);
     const nyquist = this.ctx.sampleRate / 2;
     const filterStart = Math.min(cutoffFreq, nyquist);
-    const filterTarget = Math.min(cutoffFreq * 0.1, nyquist);
-    const filterDecay = decayTime * 0.5;
-    const attack = ATTACK_SEC;
+    const filterTarget = Math.min(cutoffFreq * S.filterTargetRatio, nyquist);
+    const filterDecay = decayTime * S.filterDecayRatio;
+    const attack = S.attack;
 
     const source = this.ctx.createOscillator();
     source.frequency.value = oscFreq;
@@ -436,13 +564,13 @@ class PianoSynth {
 
     const filter = this.ctx.createBiquadFilter();
     filter.type = "lowpass";
-    filter.Q.value = -1;  // Q < 0 means "no resonance" in WebAudio
+    filter.Q.value = S.filterQ;  // Q < 0 means "no resonance" in WebAudio
     const g = this.ctx.createGain();
 
-    g.gain.setValueAtTime(0.0001, startAt);
-    g.gain.setTargetAtTime(peak, startAt, attack / 3);
-    g.gain.setTargetAtTime(0, startAt + attack, decayTime / 2);
-    const naturalEnd = startAt + attack + Math.max(decayTime * 4, 3.0);
+    g.gain.setValueAtTime(S.silenceFloor, startAt);
+    g.gain.setTargetAtTime(peak, startAt, attack / S.tcRatio);
+    g.gain.setTargetAtTime(0, startAt + attack, decayTime * S.decayTc);
+    const naturalEnd = startAt + attack + Math.max(decayTime * S.decayTail, S.decayTailMin);
 
     filter.frequency.setValueAtTime(filterStart, startAt);
     filter.frequency.setTargetAtTime(filterTarget, startAt + attack, filterDecay);
@@ -455,31 +583,32 @@ class PianoSynth {
 
     source.start(startAt);
 
-    const noiseBuf = this._getHammerNoiseBuffer();
-    const noiseSrc = this.ctx.createBufferSource();
-    noiseSrc.buffer = noiseBuf;
+    if (S.hammerNoise) {
+      const noiseSrc = this.ctx.createBufferSource();
+      noiseSrc.buffer = this._getHammerNoiseBuffer();
 
-    const noiseFilter = this.ctx.createBiquadFilter();
-    // 低音更闷一点，高音更亮
-    noiseFilter.frequency.value = baseHz + 1000;
+      const noiseFilter = this.ctx.createBiquadFilter();
+      // 低音更闷一点，高音更亮
+      noiseFilter.frequency.value = baseHz + S.hammerCutoffOffset;
 
-    const noiseGain = this.ctx.createGain();
-    // 力度用二次曲线，更接近真实击弦动态
-    const hammerLevel = Math.pow(vel, 2) * 3;
+      const noiseGain = this.ctx.createGain();
+      // 力度用曲线控制，更接近真实击弦动态
+      const hammerLevel = Math.pow(vel, S.velocityCurve) * S.hammerGain;
 
-    // 极快的起音 + 快速衰减（15~40ms）
-    const hammerDur = 0.016 + vel * 0.028;
-    noiseGain.gain.setValueAtTime(0, startAt);
-    noiseGain.gain.linearRampToValueAtTime(hammerLevel, startAt + 0.0012);
-    noiseGain.gain.exponentialRampToValueAtTime(0.0001, startAt + hammerDur);
+      // 极快的起音 + 快速衰减（15~40ms）
+      const hammerDur = S.hammerDur + vel * S.hammerDurVelocity;
+      noiseGain.gain.setValueAtTime(0, startAt);
+      noiseGain.gain.linearRampToValueAtTime(hammerLevel, startAt + S.hammerAttack);
+      noiseGain.gain.exponentialRampToValueAtTime(S.silenceFloor, startAt + hammerDur);
 
-    noiseSrc.connect(noiseFilter);
-    noiseFilter.connect(noiseGain);
-    noiseGain.connect(this.dryGain);
-    noiseGain.connect(this.convolver);   // 也送进 IR，空间感一致
+      noiseSrc.connect(noiseFilter);
+      noiseFilter.connect(noiseGain);
+      noiseGain.connect(this.dryGain);
+      noiseGain.connect(this.convolver);   // 也送进 IR，空间感一致
 
-    noiseSrc.start(startAt);
-    noiseSrc.stop(startAt + hammerDur + 0.02);
+      noiseSrc.start(startAt);
+      noiseSrc.stop(startAt + hammerDur + S.hammerStopTail);
+    }
 
     const voice = {
       source,
@@ -541,6 +670,7 @@ class PianoSynth {
     const m = this._noteNumber(midi);
     const voice = this.active.get(m);
     if (!voice || voice.stopped || voice.ended) return;
+    const S = this.settings;
     const now = this.ctx.currentTime;
     const at = Number.isFinite(atTime) && atTime > now ? atTime : now;
 
@@ -557,7 +687,8 @@ class PianoSynth {
     this._clearReleaseSchedule(voice);
     voice.stopped = true;
     this._applyReleaseRamp(voice, now);
-    this._stopSource(voice, Math.max(now + RELEASE_SEC + 0.15, voice.startAt + 0.02));
+    this._stopSource(voice, Math.max(
+      now + S.release + S.releaseTail, voice.startAt + S.minStopLead));
     this._finishVoice(m, voice);
   }
 
@@ -570,11 +701,13 @@ class PianoSynth {
 
   _scheduleRelease(m, voice, at) {
     if (voice.releaseAt === at) return;
+    const S = this.settings;
     this._applyReleaseRamp(voice, at);
-    this._stopSource(voice, Math.max(at + RELEASE_SEC + 0.15, voice.startAt + 0.02));
+    this._stopSource(voice, Math.max(
+      at + S.release + S.releaseTail, voice.startAt + S.minStopLead));
     voice.releaseAt = at;
     clearTimeout(voice.releaseTimer);
-    const finishDelay = Math.max(0, at + RELEASE_SEC - this.ctx.currentTime) * 1000;
+    const finishDelay = Math.max(0, at + S.release - this.ctx.currentTime) * 1000;
     voice.releaseTimer = setTimeout(() => {
       voice.releaseTimer = null;
       voice.releaseAt = null;
@@ -590,28 +723,31 @@ class PianoSynth {
   }
   
   _applyReleaseRamp(voice, at) {
-    const level = Math.max(this._gainAt(voice, at), 0.0001);
+    const S = this.settings;
+    const level = Math.max(this._gainAt(voice, at), S.silenceFloor);
     const gain = voice.gain.gain;
     gain.cancelScheduledValues(at);
     if (at <= this.ctx.currentTime) {
       if (gain.value === 1) gain.setValueAtTime(0, at);
-      gain.linearRampToValueAtTime(level, at + ATTACK_SEC);
+      gain.linearRampToValueAtTime(level, at + S.attack);
     } else {
       gain.setValueAtTime(level, at);
     }
-    gain.setTargetAtTime(0.0001, at + ATTACK_SEC, RELEASE_SEC / 3);
+    gain.setTargetAtTime(S.silenceFloor, at + S.attack, S.release / S.tcRatio);
   }
 
   _gainAt(voice, t) {
+    const S = this.settings;
     const startAt = voice.startAt;
     if (t < startAt) return voice.peak;
-    const decayStart = startAt + ATTACK_SEC;
+    const decayStart = startAt + S.attack;
     const levelAt = (at) => at < decayStart
       ? voice.peak
-      : voice.peak * Math.exp(-(at - decayStart) / (voice.decayTime / 2));
+      : voice.peak * Math.exp(-(at - decayStart) / (voice.decayTime * S.decayTc));
     if (voice.releaseAt === null || t < voice.releaseAt) return levelAt(t);
     const levelAtRelease = levelAt(voice.releaseAt);
-    return 0.0001 + (levelAtRelease - 0.0001) * Math.exp(-(t - voice.releaseAt) / (RELEASE_SEC / 3));
+    return S.silenceFloor + (levelAtRelease - S.silenceFloor) *
+      Math.exp(-(t - voice.releaseAt) / (S.release / S.tcRatio));
   }
 
   _finishVoice(m, voice) {
