@@ -67,7 +67,7 @@ class PianoSynth {
       // ---- 击弦噪声 ----
       hammerNoise: true,       // 是否叠加击弦噪声
       hammerGain: 0.5,           // 噪声峰值 = vel^velocityCurve * 该系数
-      hammerCurveExp: 0.3,      // 噪声频率随力度的指数曲线
+      hammerCurveExp: 0.5,      // 噪声频率随力度的指数曲线
       hammerCurveFloor: 0.2,    // 噪声频率随力度的指数曲线下限
       hammerCutoffOffset: 200, // 噪声低通 = 基频 + 该值
       hammerAttack: 0.0012,    // 噪声起音(秒)
