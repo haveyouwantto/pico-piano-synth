@@ -32,6 +32,7 @@ class PianoSynth {
       waveCacheMax: 128,       // PeriodicWave 缓存条数上限
 
       // ---- 音量包络 ----
+      pitchAttenCurve: 48,      // 高频音量衰减曲线(音高每升 n 半音衰减一半)
       attack: 0.001,           // 起音时间常数(秒)
       release: 0.3,            // 释音时间常数(秒)
       tcRatio: 3,              // setTargetAtTime 时间常数 = 设定时间 / 该值
@@ -47,7 +48,7 @@ class PianoSynth {
       decayRefNote: 60,        // 以该音高为 1x 基准
       decayPitchDiv: 18,       // 音高偏移除数
       decayMin: 0.5,           // 衰减时间下限(秒)
-      decayTc: 0.5,            // 指数衰减时间常数 = decayTime * 该系数
+      decayTc: 0.4,            // 指数衰减时间常数 = decayTime * 该系数
       decayTail: 4,            // 自然结束后停 source: decayTime * 该系数
       decayTailMin: 3.0,       // 上一项与至少这么多秒取大
 
@@ -65,14 +66,13 @@ class PianoSynth {
 
       // ---- 击弦噪声 ----
       hammerNoise: true,       // 是否叠加击弦噪声
-      hammerGain: 3,           // 噪声峰值 = vel^velocityCurve * 该系数
-      hammerCutoffOffset: 1000, // 噪声低通 = 基频 + 该值
+      hammerGain: 0.5,           // 噪声峰值 = vel^velocityCurve * 该系数
+      hammerCutoffOffset: 200, // 噪声低通 = 基频 + 该值
       hammerAttack: 0.0012,    // 噪声起音(秒)
       hammerDur: 0.016,        // 噪声时长 = hammerDur + vel * hammerDurVelocity
       hammerDurVelocity: 0.028,
       hammerStopTail: 0.02,    // 噪声 source 停止的额外余量(秒)
       noiseDuration: 0.08,     // 噪声 buffer 长度(秒)
-      noisePink: 0.02,         // 粉红噪声倾向系数
       noiseSeed: 42,           // 噪声 buffer 随机种子(固定值保证可复现)
       silenceFloor: 0.0001,    // 指数斜坡与静音下限
 
@@ -400,13 +400,10 @@ class PianoSynth {
     const buffer = this.ctx.createBuffer(1, length, sampleRate);
     const data = buffer.getChannelData(0);
 
-    // 白噪声 + 轻微粉红噪声倾向（更接近真实击弦）
-    const pink = S.noisePink;
-    let last = 0;
+    // 白噪声
     for (let i = 0; i < length; i++) {
       const white = rand() * 2 - 1;
-      data[i] = (last + pink * white) / (1 + pink);
-      last = data[i];
+      data[i] = white;
     }
     this._hammerNoiseBuffer = buffer;
     return buffer;
@@ -545,7 +542,12 @@ class PianoSynth {
     const baseHz = Number.isFinite(options.frequency) && options.frequency > 0
       ? options.frequency : noteHz;
     const oscFreq = baseHz * Math.pow(2, detune / 1200);
-    const peak = Math.pow(vel, S.velocityCurve) * S.velocityGain;
+    
+    // 高频音量衰减
+    const pitchAtten = Math.pow(2, (60 - m) / S.pitchAttenCurve);
+    // 限制最低衰减，避免最低音过大
+    const atten = Math.max(0.35, Math.min(1.6, pitchAtten));
+    const peak = Math.pow(vel, S.velocityCurve) * S.velocityGain * atten;
 
     const decayTime = Math.max(
       S.decay * S.decayScale * Math.pow(2, (S.decayRefNote - m) / S.decayPitchDiv),
