@@ -14,7 +14,7 @@
  *   synth.noteOff(60);
  */
 
-const ATTACK_SEC = 0.002;
+const ATTACK_SEC = 0.001;
 const RELEASE_SEC = 0.3;
 const WAVE_CACHE_MAX = 128;
 
@@ -461,7 +461,7 @@ class PianoSynth {
 
     const noiseFilter = this.ctx.createBiquadFilter();
     // 低音更闷一点，高音更亮
-    noiseFilter.frequency.value = baseHz + 500;
+    noiseFilter.frequency.value = baseHz + 1000;
 
     const noiseGain = this.ctx.createGain();
     // 力度用二次曲线，更接近真实击弦动态
