@@ -57,7 +57,7 @@ class PianoSynth {
       filterVelocityExp: 2.5,
       filterTargetRatio: 0.1,  // 终止频率 = 起始频率 * 该系数
       filterDecayRatio: 0.5,   // 扫频时间常数 = decayTime * 该系数
-      filterQ: -1,             // Q < 0 表示无共振
+      filterQ: -3,             // Q = -3 表示无共振
 
       // ---- 谐波 ----
       partialMaxHz: 12000,     // 只保留低于该频率的谐波(抗混叠)
@@ -74,6 +74,7 @@ class PianoSynth {
       hammerDur: 0.016,        // 噪声时长 = hammerDur + vel * hammerDurVelocity
       hammerDurVelocity: 0.028,
       hammerStopTail: 0.02,    // 噪声 source 停止的额外余量(秒)
+      hammerFilterQ: -3,          // 击弦噪声低通滤波器 Q
       noiseDuration: 0.08,     // 噪声 buffer 长度(秒)
       noiseSeed: 42,           // 噪声 buffer 随机种子(固定值保证可复现)
       silenceFloor: 0.0001,    // 指数斜坡与静音下限
@@ -592,6 +593,7 @@ class PianoSynth {
       noiseSrc.buffer = this._getHammerNoiseBuffer();
 
       const noiseFilter = this.ctx.createBiquadFilter();
+      noiseFilter.Q.value = S.hammerFilterQ;
       // 低音更闷一点，高音更亮
       noiseFilter.frequency.value = baseHz * Math.max(S.hammerCurveFloor, vel ** S.hammerCurveExp) + S.hammerCutoffOffset;
 
