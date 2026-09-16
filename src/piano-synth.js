@@ -59,6 +59,9 @@ class PianoSynth {
       filterDecayRatio: 0.5,   // 扫频时间常数 = decayTime * 该系数
       filterQ: -3,             // Q = -3 表示无共振
 
+      // ---- 声像 ----
+      pannerDistance: 1,
+
       // ---- 谐波 ----
       partialMaxHz: 12000,     // 只保留低于该频率的谐波(抗混叠)
       partialMargin: 0.98,     // 再乘该系数留裕量
@@ -341,7 +344,7 @@ class PianoSynth {
     if (this.ctx && this.ctx.state !== "closed") {
       for (const m of [...this.active.keys()]) this._release(m);
       for (const node of [this.master, this.compressor, this.output,
-        this.dryGain, this.wetGain, this.convolver]) {
+      this.dryGain, this.wetGain, this.convolver]) {
         if (node) node.disconnect();
       }
       if (this._ownsContext) this.ctx.close();
@@ -545,7 +548,7 @@ class PianoSynth {
     const baseHz = Number.isFinite(options.frequency) && options.frequency > 0
       ? options.frequency : noteHz;
     const oscFreq = baseHz * Math.pow(2, detune / 1200);
-    
+
     // 高频音量衰减
     const pitchAtten = Math.pow(2, (60 - m) / S.pitchAttenCurve);
     // 限制最低衰减，避免最低音过大
@@ -569,7 +572,12 @@ class PianoSynth {
 
     const filter = this.ctx.createBiquadFilter();
     filter.type = "lowpass";
-    filter.Q.value = S.filterQ;  // Q < 0 means "no resonance" in WebAudio
+    filter.Q.value = S.filterQ;
+
+    const panner = this.ctx.createStereoPanner();
+    const x = (midi - 64) / 64;
+    panner.pan.value = (2 / Math.PI) * Math.atan(x / S.pannerDistance);
+
     const g = this.ctx.createGain();
 
     g.gain.setValueAtTime(S.silenceFloor, startAt);
@@ -581,7 +589,8 @@ class PianoSynth {
     filter.frequency.setTargetAtTime(filterTarget, startAt + attack, filterDecay);
 
     source.connect(filter);
-    filter.connect(g);
+    filter.connect(panner);
+    panner.connect(g);
 
     g.connect(this.dryGain);
     g.connect(this.convolver);
@@ -727,7 +736,7 @@ class PianoSynth {
     clearTimeout(voice.stopTimer);
     voice.source.stop(at);
   }
-  
+
   _applyReleaseRamp(voice, at) {
     const S = this.settings;
     const level = Math.max(this._gainAt(voice, at), S.silenceFloor);
